@@ -22,7 +22,7 @@ A food detection and calorie estimation system designed for Raspberry Pi Zero W,
 
 ## 📦 Setup & Execution
 
-### Option A — Automated Setup (Recommended)
+### Automated Setup (Recommended)
 
 ```bash
 # On your Raspberry Pi (Zero W or newer)
