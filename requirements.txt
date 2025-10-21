@@ -3,18 +3,22 @@
 # Optimized for minimal resource usage
 
 # Core Python packages
-numpy>=1.21.0,<1.25.0  # Compatible with Pi Zero W
-Pillow>=9.0.0,<11.0.0
+# NOTE: On Raspberry Pi Zero W (armv6l), install via apt instead of pip:
+#   sudo apt install -y python3-numpy python3-pil
+numpy==1.21.6; platform_system!="Linux" or platform_machine!="armv6l"
+Pillow==9.5.0; platform_system!="Linux" or platform_machine!="armv6l"
 
-# Computer vision (lightweight alternatives to OpenCV)
-scikit-image>=0.19.0,<0.22.0
+# Computer vision (lightweight alternative to OpenCV)
+# Skip on armv6l to avoid heavy builds on Pi Zero W
+scikit-image==0.19.3; platform_machine!="armv6l"
 
-# TensorFlow Lite for food detection models (choose one option below)
-# Option 1: TensorFlow Lite runtime only (RECOMMENDED for Pi Zero W - much smaller)
-tflite-runtime>=2.13.0,<2.15.0
+# TensorFlow Lite runtime (Linux ARM only). Not installed on macOS/Windows.
+# Note: Official wheels are available for armv7l and aarch64. Pi Zero W (armv6l)
+# typically lacks official wheels; the app will gracefully fall back to CV.
+tflite-runtime>=2.5.0; platform_system=="Linux" and (platform_machine=="armv7l" or platform_machine=="aarch64")
 
-# Option 2: Full TensorFlow (uncomment if you need full TF features)
-# tensorflow>=2.13.0,<2.15.0
+# macOS optional (commented):
+# tensorflow-macos>=2.12.0; platform_system=="Darwin"
 
 # LLM integration
 groq>=0.4.0,<1.0.0
@@ -24,24 +28,19 @@ psutil>=5.8.0,<6.0.0
 python-dotenv>=0.19.0,<2.0.0
 
 # Raspberry Pi specific libraries
-# Note: These will only install on Raspberry Pi
-picamera2>=0.3.0; platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64"
-RPi.GPIO>=0.7.0; platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64"
+# Picamera2 is installed via apt in deploy_pi.sh (more reliable than pip).
+RPi.GPIO>=0.7.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
 
 # OLED Display support (Adafruit CircuitPython libraries)
-adafruit-circuitpython-displayio-ssd1306>=1.5.0,<2.0.0; platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64"
-adafruit-circuitpython-display-text>=2.25.0,<3.0.0; platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64"
-adafruit-blinka>=8.0.0,<9.0.0; platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64"
+adafruit-circuitpython-displayio-ssd1306>=1.5.0,<2.0.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
+adafruit-circuitpython-display-text>=2.25.0,<3.0.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
+adafruit-blinka>=8.0.0,<9.0.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
 
-# Optional: Minimal OpenCV for USB camera fallback
-# Uncomment if Pi Camera doesn't work and you need USB camera support
-# opencv-python-headless>=4.5.0,<5.0.0
 
 # Development dependencies (optional - uncomment for development)
 # pytest>=7.0.0,<8.0.0
 # black>=22.0.0,<24.0.0
 # flake8>=4.0.0,<7.0.0
 
-# Alternative lightweight packages for development/testing on non-Pi systems
-# These provide mock implementations when Pi-specific hardware isn't available
-fake-rpi>=0.7.0; platform_machine!="armv6l" and platform_machine!="armv7l" and platform_machine!="aarch64"
+# Alternative lightweight packages for development/testing on non-Pi systems (optional)
+# fake-rpi>=0.7.0; platform_system!="Linux"

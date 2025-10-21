@@ -1,10 +1,6 @@
-<<<<<<< HEAD
-# V.A.R.G {Virtual Augmented Reality Glasses}
-This is the Python Script for our Virtually Augmented Reality Glasses which integrates Python Libraries like OpenCV with RESTful API's and modern LLM's. It was a part of our B.Tech Course in the Exploratory Project an academic requirement in the B.Tech ICT Branch.
-=======
 # V.A.R.G -  Virtual Augmented Reality Glasses
 
-A sophisticated food detection and calorie estimation system designed for Raspberry Pi Zero W, using OpenCV computer vision and Groq LLM integration.
+A food detection and calorie estimation system designed for Raspberry Pi Zero W, using lightweight computer vision (PIL/scikit-image), TensorFlow Lite, and Groq LLM integration.
 
 ## 🎯 Features
 
@@ -15,7 +11,7 @@ A sophisticated food detection and calorie estimation system designed for Raspbe
 - **Smart Detection Pipeline**: Only triggers LLM analysis when food is actually detected
 - **Transparent OLED Display**: Shows real-time detection status and calorie information
 - **Asynchronous Processing**: Non-blocking LLM analysis with background threading
-- **Multiple Detection Methods**: TFLite models with traditional CV fallback
+- **Multiple Detection Methods**: TFLite models with lightweight PIL/scikit-image fallback
 
 ## 🛠️ Hardware Requirements
 
@@ -62,6 +58,12 @@ Monitor:
 sudo journalctl -u varg.service -f
 ```
 
+### Lightweight Detection Stack
+
+- Default pipeline is optimized for Raspberry Pi Zero W:
+  - TensorFlow Lite runtime (int8 EfficientNet‑Lite) for food classification
+  - PIL for preprocessing (brightness/contrast/blur), fast and low‑memory
+  - scikit‑image (optional) for connected components; can be omitted if needed
 ### Smart Glasses Profile (Performance-Friendly)
 
 Recommended `config.json` changes for longer battery life and lower heat:
@@ -94,17 +96,37 @@ GROQ_API_KEY=your_groq_api_key_here
 {
   "groq_api_key": "",
   "camera_index": 0,
-  "camera_width": 640,
-  "camera_height": 480,
+  "camera_width": 320,
+  "camera_height": 240,
   "detection_confidence": 0.5,
   "calorie_estimation_model": "llama3-70b-8192",
-  "detection_interval": 2.0,
-  "save_images": true,
+  "detection_interval": 3.0,
+  "save_images": false,
   "output_dir": "detections",
   "preprocessing": {
-    "blur_kernel": 5,
-    "brightness_adjustment": 1.2,
-    "contrast_adjustment": 1.1
+    "blur_kernel": 3,
+    "brightness_adjustment": 1.1,
+    "contrast_adjustment": 1.05
+  },
+  "performance": {
+    "max_fps": 10,
+    "frame_skip": 2,
+    "low_quality_threshold": 75,
+    "memory_cleanup_interval": 30
+  },
+  "oled_display": {
+    "width": 128,
+    "height": 64,
+    "update_interval": 1.0,
+    "show_system_info": true
+  },
+  "tflite": {
+    "enabled": true,
+    "model_path": "models/efficientnet_food.tflite",
+    "confidence_threshold": 0.35,
+    "max_detections": 3,
+    "use_fallback_cv": true,
+    "smoothing": { "enabled": true, "window": 3 }
   }
 }
 ```
@@ -175,11 +197,23 @@ logs/
 
 ### Camera Issues
 ```bash
-# Test camera
-python3 -c "import cv2; print('Camera OK' if cv2.VideoCapture(0).isOpened() else 'Camera Error')"
-
 # Enable camera interface
 sudo raspi-config nonint do_camera 0
+
+# Quick test (Picamera2)
+python3 - << 'PY'
+from picamera2 import Picamera2
+from time import sleep
+cam = Picamera2()
+cam.start()
+sleep(1)
+arr = cam.capture_array()
+cam.stop()
+print('Camera OK' if arr is not None else 'Camera Error')
+PY
+
+# Or use libcamera tool
+libcamera-hello --timeout 2000
 ```
 
 ### Performance Optimization
@@ -228,22 +262,3 @@ Get your Groq API key from [Groq Console](https://console.groq.com/):
 ## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- OpenCV community for computer vision tools
-- Groq for LLM API access
-- Raspberry Pi Foundation for affordable computing hardware
-
-## 📞 Support
-
-For issues and questions:
-1. Check the troubleshooting section
-2. Review system logs: `tail -f varg.log`
-3. Test individual components (camera, API connection)
-4. Open an issue with detailed error information
-
----
-
-**V.A.R.G** - Making food tracking intelligent and automated! 🍽️🤖
->>>>>>> ec9c8a2 (python script init commit)

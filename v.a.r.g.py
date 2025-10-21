@@ -647,32 +647,28 @@ class OLEDDisplay:
                 draw.text((25, 35), "Food...", font=self.small_font, fill=1)
             return img
         
-        y_pos = 2
+        y_pos = 4
         
         # Show first food item (most confident)
         food = foods[0]
-        name = food["name"][:12]  # Truncate long names
-        calories = food["calories"]
+        name = str(food.get("name", "Food"))[:14]  # Truncate long names to fit
+        calories = int(food.get("calories", 0))
         
-        # Food name
-        draw.text((2, y_pos), name, font=self.font, fill=1)
-        y_pos += 15
+        # Determine harm level from calories (simple heuristic)
+        # LOW: <=150 kcal, MED: 151-300 kcal, HIGH: >300 kcal
+        if calories <= 150:
+            harm = "LOW"
+        elif calories <= 300:
+            harm = "MED"
+        else:
+            harm = "HIGH"
         
-        # Calories with emphasis
-        cal_text = f"{calories} cal"
-        draw.text((2, y_pos), cal_text, font=self.small_font, fill=1)
+        # Vertical layout: Name, Calories, Harm level
+        draw.text((4, y_pos), name, font=self.font, fill=1)
+        y_pos += 18
+        draw.text((4, y_pos), f"Cal: {calories} kcal", font=self.small_font, fill=1)
         y_pos += 12
-        
-        # Confidence bar
-        confidence = food.get("confidence", 5)
-        bar_width = int((confidence / 10) * (self.width - 20))
-        draw.rectangle([(2, y_pos), (2 + bar_width, y_pos + 3)], fill=1)
-        y_pos += 8
-        
-        # Total calories if multiple foods
-        if "total_calories" in foods_data and len(foods) > 1:
-            total_text = f"Total: {foods_data['total_calories']}"
-            draw.text((2, y_pos), total_text, font=self.small_font, fill=1)
+        draw.text((4, y_pos), f"Harm: {harm}", font=self.small_font, fill=1)
         
         return img
     
@@ -890,26 +886,9 @@ class FoodDetector:
                     return
                     
                 except Exception as e:
-                    logger.warning(f"Pi Camera initialization failed: {e}, falling back to USB camera")
-            
-            # Fallback to USB camera with OpenCV
-            backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
-            
-            for backend in backends:
-                self.camera = cv2.VideoCapture(self.config["camera_index"], backend)
-                if self.camera.isOpened():
-                    break
-            
-            if not self.camera or not self.camera.isOpened():
-                raise RuntimeError("Could not open any camera")
-            
-            # Set camera properties optimized for Raspberry Pi Zero W
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.config["camera_width"])
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config["camera_height"])
-            self.camera.set(cv2.CAP_PROP_FPS, self.config["performance"]["max_fps"])
-            self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer
-            
-            logger.info("USB Camera initialized successfully")
+                    logger.warning(f"Pi Camera initialization failed: {e}")
+            # No OpenCV USB fallback: enforce Pi Camera usage only
+            raise RuntimeError("Pi Camera not available. Please enable the camera interface or install Picamera2.")
             
         except Exception as e:
             logger.error(f"Failed to initialize camera: {e}")
@@ -965,16 +944,6 @@ class FoodDetector:
                 # Convert to PIL Image (RGB format)
                 frame = Image.fromarray(frame_array)
                 return True, frame
-            elif self.camera and OPENCV_AVAILABLE:
-                # Use USB camera with OpenCV
-                ret, frame_array = self.camera.read()
-                if ret:
-                    # Convert BGR to RGB and then to PIL
-                    frame_rgb = cv2.cvtColor(frame_array, cv2.COLOR_BGR2RGB)
-                    frame = Image.fromarray(frame_rgb)
-                    return True, frame
-                else:
-                    return False, None
             else:
                 return False, None
         except Exception as e:
@@ -1330,7 +1299,16 @@ class FoodDetector:
             
             # Save image
             image_path = os.path.join(output_dir, f"detection_{timestamp}.jpg")
-            cv2.imwrite(image_path, frame)
+            try:
+                # Ensure PIL Image
+                if isinstance(frame, Image.Image):
+                    frame.save(image_path, format="JPEG", quality=85)
+                else:
+                    # If numpy array, convert safely
+                    img = Image.fromarray(frame)
+                    img.save(image_path, format="JPEG", quality=85)
+            except Exception as e:
+                logger.warning(f"Failed to save image via PIL: {e}")
             
             # Save result JSON
             result_path = os.path.join(output_dir, f"result_{timestamp}.json")
