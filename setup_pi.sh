@@ -82,26 +82,41 @@ fi
 # Make the main script executable
 chmod +x v.a.r.g.py
 
-# Create systemd service file for auto-start (optional)
+# Create systemd service file for auto-start
 echo "🔧 Creating systemd service..."
+
+# Resolve working directory and user dynamically
+VARG_DIR=$(pwd)
+RUN_USER=$(whoami)
+
 sudo tee /etc/systemd/system/varg.service > /dev/null << EOF
 [Unit]
 Description=V.A.R.G Food Detection System
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/V.A.R.G
-Environment=PATH=/home/pi/V.A.R.G/varg_env/bin
-EnvironmentFile=/home/pi/V.A.R.G/.env
-ExecStart=/home/pi/V.A.R.G/varg_env/bin/python /home/pi/V.A.R.G/v.a.r.g.py
+User=$RUN_USER
+WorkingDirectory=$VARG_DIR
+Environment=PATH=$VARG_DIR/varg_env/bin
+EnvironmentFile=$VARG_DIR/.env
+ExecStart=$VARG_DIR/varg_env/bin/python $VARG_DIR/v.a.r.g.py
 Restart=always
 RestartSec=10
+
+# Resource limits for Pi Zero W
+MemoryMax=400M
+CPUQuota=80%
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+echo " Enabling and starting service..."
+sudo systemctl daemon-reload
+sudo systemctl enable varg.service
+sudo systemctl start varg.service
 
 echo " Setup complete!"
 echo ""
@@ -110,7 +125,5 @@ echo "1. Copy .env.template to .env and add your Groq API key"
 echo "2. Edit config.json if needed"
 echo "3. Run the system: python3 v.a.r.g.py"
 echo ""
-echo " Optional: Enable auto-start on boot:"
-echo "   sudo systemctl enable varg.service"
-echo "   sudo systemctl start varg.service"
+echo " Service enabled and started. It will auto-start on boot."
 echo ""

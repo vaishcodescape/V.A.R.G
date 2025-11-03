@@ -27,7 +27,7 @@
   },
   "tflite": {
     "enabled": true,
-    "model_path": "models/efficientnet_food.tflite",
+    "model_path": "kagglehub:google/aiy/tfLite/vision-classifier-food-v1",
     "confidence_threshold": 0.35,
     "max_detections": 3,
     "use_fallback_cv": true,

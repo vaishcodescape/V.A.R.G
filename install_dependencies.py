@@ -52,6 +52,7 @@ class DependencyManager:
             'tflite_runtime': 'tflite-runtime>=2.13.0,<2.15.0',
             'tensorflow': 'tensorflow>=2.13.0,<2.15.0',
             'cv2': 'opencv-python-headless>=4.5.0,<5.0.0',
+            'kagglehub': 'kagglehub>=0.2.0,<1.0.0',
         }
         
         # Raspberry Pi specific dependencies
@@ -198,6 +199,15 @@ class DependencyManager:
             description = self.get_package_description(module)
             print(f"{i}. {module}: {description}")
         
+        # In non-interactive contexts (e.g., scripts), skip prompts and continue
+        try:
+            import sys as _sys
+            if not _sys.stdin.isatty():
+                logger.info("Non-interactive mode detected; skipping optional dependencies")
+                return True
+        except Exception:
+            pass
+
         try:
             choice = input("\nInstall optional dependencies? (y/n/selective): ").lower().strip()
             

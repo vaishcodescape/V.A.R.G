@@ -45,9 +45,15 @@ check_raspberry_pi() {
 optimize_pi_zero() {
     print_step "Optimizing Raspberry Pi Zero W settings..."
     
+    # Determine boot config path (Bookworm uses /boot/firmware)
+    CONFIG_FILE=/boot/config.txt
+    if [ -f /boot/firmware/config.txt ]; then
+        CONFIG_FILE=/boot/firmware/config.txt
+    fi
+    
     # Increase GPU memory split for camera operations
-    if ! grep -q "gpu_mem=128" /boot/config.txt; then
-        echo "gpu_mem=128" | sudo tee -a /boot/config.txt
+    if ! grep -q "^gpu_mem=128" "$CONFIG_FILE"; then
+        echo "gpu_mem=128" | sudo tee -a "$CONFIG_FILE" >/dev/null
         print_status "Set GPU memory to 128MB"
     fi
     
@@ -59,9 +65,9 @@ optimize_pi_zero() {
     sudo raspi-config nonint do_i2c 0
     print_status "I2C interface enabled"
     
-    # Optimize for performance
-    if ! grep -q "arm_freq=1000" /boot/config.txt; then
-        echo "arm_freq=1000" | sudo tee -a /boot/config.txt
+    # Optimize for performance (use cautiously on Pi Zero W)
+    if ! grep -q "^arm_freq=1000" "$CONFIG_FILE"; then
+        echo "arm_freq=1000" | sudo tee -a "$CONFIG_FILE" >/dev/null
         print_status "Set ARM frequency to 1000MHz"
     fi
     
@@ -77,39 +83,68 @@ optimize_pi_zero() {
 install_system_deps() {
     print_step "Installing system dependencies..."
     
-    sudo apt update
-    sudo apt install -y \
-        python3-pip \
-        python3-venv \
-        python3-dev \
-        libatlas-base-dev \
-        libjpeg-dev \
-        libpng-dev \
-        libtiff-dev \
-        libavcodec-dev \
-        libavformat-dev \
-        libswscale-dev \
-        libv4l-dev \
-        libxvidcore-dev \
-        libx264-dev \
-        libfontconfig1-dev \
-        libcairo2-dev \
-        libgdk-pixbuf2.0-dev \
-        libpango1.0-dev \
-        libgtk2.0-dev \
-        libgtk-3-dev \
-        libatlas-base-dev \
-        gfortran \
-        libhdf5-dev \
-        libhdf5-serial-dev \
-        libhdf5-103 \
-        python3-pyqt5 \
-        python3-h5py \
-        libjasper-dev \
-        libqtgui4 \
-        libqt4-test
-    
-    print_status "System dependencies installed"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+
+    # Helper: install a package if available; warn and continue if not
+    apt_install_safe() {
+        local pkg="$1"
+        if sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq "$pkg"; then
+            print_status "Installed: $pkg"
+            return 0
+        else
+            print_warning "Package not available or failed: $pkg (continuing)"
+            return 1
+        fi
+    }
+
+    # Base packages (lightweight, broadly available)
+    BASE_PKGS=(
+        python3-pip
+        python3-venv
+        python3-dev
+        libatlas-base-dev
+        libjpeg-dev
+        libpng-dev
+        libtiff-dev
+        libv4l-dev
+        libfontconfig1-dev
+        libcairo2-dev
+        libgdk-pixbuf2.0-dev
+        libpango1.0-dev
+        libgtk-3-dev
+        gfortran
+        libhdf5-dev
+        libhdf5-serial-dev
+        python3-pyqt5
+        python3-h5py
+        libjasper-dev
+        i2c-tools
+    )
+
+    for p in "${BASE_PKGS[@]}"; do
+        apt_install_safe "$p" >/dev/null
+    done
+
+    # Media codecs (optional)
+    OPTIONAL_MEDIA=(libavcodec-dev libavformat-dev libswscale-dev libxvidcore-dev libx264-dev)
+    for p in "${OPTIONAL_MEDIA[@]}"; do
+        apt_install_safe "$p" >/dev/null
+    done
+
+    # Legacy/renamed packages (skip on modern distros)
+    LEGACY_PKGS=(libqtgui4 libqt4-test libgtk2.0-dev libhdf5-103)
+    for p in "${LEGACY_PKGS[@]}"; do
+        apt_install_safe "$p" >/dev/null || true
+    done
+
+    # Picamera2 (fallback to libcamera if unavailable)
+    if ! apt_install_safe python3-picamera2 >/dev/null; then
+        print_warning "Falling back to libcamera tools (USB/OpenCV fallback still supported)"
+        apt_install_safe python3-libcamera >/dev/null || true
+        apt_install_safe libcamera-apps >/dev/null || true
+    fi
+
+    print_status "System dependencies step completed"
 }
 
 # Setup Python environment
@@ -154,8 +189,8 @@ create_service() {
     sudo tee /etc/systemd/system/varg.service > /dev/null << EOF
 [Unit]
 Description=V.A.R.G Food Detection System
-After=network.target
-Wants=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -163,6 +198,7 @@ User=$USER
 Group=$USER
 WorkingDirectory=$VARG_DIR
 Environment=PATH=$VARG_DIR/varg_env/bin
+EnvironmentFile=$VARG_DIR/.env
 ExecStart=$VARG_DIR/varg_env/bin/python $VARG_DIR/v.a.r.g.py
 Restart=always
 RestartSec=10
@@ -180,8 +216,14 @@ EOF
     # Reload systemd and enable service
     sudo systemctl daemon-reload
     sudo systemctl enable varg.service
-    
-    print_status "Systemd service created and enabled"
+
+    # Start only if GROQ_API_KEY is present (user may add it manually later)
+    if [ -f "$VARG_DIR/.env" ] && grep -qE '^GROQ_API_KEY=.+$' "$VARG_DIR/.env"; then
+        sudo systemctl start varg.service
+        print_status "Systemd service created, enabled, and started"
+    else
+        print_warning "GROQ_API_KEY not set yet; service enabled but not started. Add key to .env and run: sudo systemctl start varg.service"
+    fi
 }
 
 # Create startup script
@@ -274,35 +316,33 @@ main() {
     
     # Setup models
     setup_models
-    
-    # Create service files
-    create_service
-    create_startup_script
-    create_monitoring_script
-    
+
     print_step "Creating configuration files..."
-    
-    # Create .env template if it doesn't exist
+    # Create .env template if it doesn't exist (before service creation)
     if [ ! -f ".env" ]; then
         cat > .env << EOF
 # Groq API Configuration
-GROQ_API_KEY=your_groq_api_key_here
+GROQ_API_KEY=
 
 # Optional: Override config settings
 # CAMERA_INDEX=0
 # DETECTION_INTERVAL=3.0
 EOF
-        print_warning "Created .env template. Please add your Groq API key!"
+        print_warning "Created .env template. Add your Groq API key if using LLM."
     fi
+
+    # Create service files
+    create_service
+    create_startup_script
+    create_monitoring_script
     
     echo ""
     print_status "✅ V.A.R.G deployment complete!"
     echo ""
     echo "🔧 Next Steps:"
-    echo "1. Edit .env file and add your Groq API key"
-    echo "2. Test the system: ./start_varg.sh"
-    echo "3. Enable auto-start: sudo systemctl start varg.service"
-    echo "4. Monitor system: ./monitor_varg.sh"
+    echo "1. Edit .env and set GROQ_API_KEY (optional)"
+    echo "2. Monitor service: ./monitor_varg.sh or 'sudo journalctl -u varg.service -f'"
+    echo "3. Reboot recommended to apply firmware config: sudo reboot"
     echo ""
     echo "📊 Performance Tips for Pi Zero W:"
     echo "- System will automatically optimize based on CPU/memory usage"

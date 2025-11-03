@@ -23,6 +23,19 @@ import threading
 from collections import deque
 import psutil
 
+# Pillow resampling compatibility (older Pillow on Pi may lack Image.Resampling)
+try:
+    RESAMPLE_LANCZOS = Image.Resampling.LANCZOS  # Pillow >=9.1
+except Exception:
+    RESAMPLE_LANCZOS = getattr(Image, "LANCZOS", Image.BICUBIC)
+
+# Load environment variables from .env if present (optional on Pi)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=".env", override=False)
+except Exception:
+    pass
+
 # Try to import lightweight computer vision libraries
 try:
     from skimage import measure, morphology, color
@@ -105,14 +118,30 @@ class LightweightCV:
     def numpy_to_pil(np_array):
         """Convert numpy array to PIL image"""
         if np_array.dtype != np.uint8:
-            np_array = img_as_ubyte(np_array)
+            # Safely convert to 8-bit without requiring scikit-image
+            try:
+                if SKIMAGE_AVAILABLE:
+                    from skimage.util import img_as_ubyte as _img_as_ubyte
+                    np_array = _img_as_ubyte(np_array)
+                else:
+                    if 'float' in str(np_array.dtype):
+                        np_array = (np.clip(np_array, 0.0, 1.0) * 255.0).astype(np.uint8)
+                    else:
+                        np_array = np.clip(np_array, 0, 255).astype(np.uint8)
+            except Exception:
+                if 'float' in str(np_array.dtype):
+                    np_array = (np.clip(np_array, 0.0, 1.0) * 255.0).astype(np.uint8)
+                else:
+                    np_array = np.clip(np_array, 0, 255).astype(np.uint8)
         return Image.fromarray(np_array)
     
     @staticmethod
-    def resize_image(image, size, method=Image.Resampling.LANCZOS):
+    def resize_image(image, size, method=None):
         """Resize image efficiently"""
         if isinstance(image, np.ndarray):
             image = LightweightCV.numpy_to_pil(image)
+        if method is None:
+            method = RESAMPLE_LANCZOS
         return image.resize(size, method)
     
     @staticmethod
@@ -257,10 +286,24 @@ class LightweightCV:
             
             return contours
         else:
-            # Fallback to simple blob detection
-            # This is a simplified version - in practice, you might want to use
-            # more sophisticated blob detection
-            return []
+            # Fallback: create a single bounding box over non-zero area
+            try:
+                pil_mask = mask_image if isinstance(mask_image, Image.Image) else Image.fromarray(mask_array)
+                bbox = pil_mask.getbbox()
+                if not bbox:
+                    return []
+                x0, y0, x1, y1 = bbox
+                w, h = max(0, x1 - x0), max(0, y1 - y0)
+                area = w * h
+                if area < min_area:
+                    return []
+                return [{
+                    'bbox': (x0, y0, w, h),
+                    'area': area,
+                    'centroid': (y0 + h / 2.0, x0 + w / 2.0)
+                }]
+            except Exception:
+                return []
     
     @staticmethod
     def morphological_operations(image, operation='close', kernel_size=5):
@@ -343,7 +386,42 @@ class TFLiteFoodDetector:
         try:
             # Try to load specified model or default models
             models_to_try = []
-            
+
+            # Support KaggleHub model path: "kagglehub:<model_id>"
+            if model_path and isinstance(model_path, str) and model_path.startswith("kagglehub"):
+                try:
+                    parts = model_path.split(":", 1)
+                    kh_id = parts[1] if len(parts) > 1 else "google/aiy/tfLite/vision-classifier-food-v1"
+                    import importlib
+                    kagglehub = importlib.import_module("kagglehub")
+                    download_dir = kagglehub.model_download(kh_id)
+                    # Find first .tflite file in download dir
+                    chosen = None
+                    for root, _, files in os.walk(download_dir):
+                        for f in files:
+                            if f.lower().endswith(".tflite"):
+                                chosen = os.path.join(root, f)
+                                break
+                        if chosen:
+                            break
+                    if chosen and os.path.exists(chosen):
+                        os.makedirs('models', exist_ok=True)
+                        dest_name = os.path.basename(chosen)
+                        dest_path = os.path.join('models', dest_name)
+                        try:
+                            if chosen != dest_path:
+                                import shutil
+                                shutil.copy2(chosen, dest_path)
+                            models_to_try.append(dest_path)
+                            logger.info(f"Using KaggleHub model: {dest_path}")
+                        except Exception:
+                            models_to_try.append(chosen)
+                            logger.info(f"Using KaggleHub model in-place: {chosen}")
+                    else:
+                        logger.warning("KaggleHub download succeeded but no .tflite file found")
+                except Exception as e:
+                    logger.warning(f"KaggleHub model resolution failed: {e}")
+
             if model_path and os.path.exists(model_path):
                 models_to_try.append(model_path)
             
@@ -451,7 +529,7 @@ class TFLiteFoodDetector:
                 target_height, target_width = 224, 224  # Default size
             
             # Resize image
-            image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            image = image.resize((target_width, target_height), RESAMPLE_LANCZOS)
             
             # Convert to RGB if needed
             if image.mode != 'RGB':
@@ -588,7 +666,11 @@ class OLEDDisplay:
             
             # Initialize I2C
             i2c = board.I2C()
-            display_bus = displayio.I2CDisplay(i2c, device_address=0x3D)
+            # Try common SSD1306 I2C addresses (0x3C then 0x3D)
+            try:
+                display_bus = displayio.I2CDisplay(i2c, device_address=0x3C)
+            except Exception:
+                display_bus = displayio.I2CDisplay(i2c, device_address=0x3D)
             
             # Initialize display
             self.display = adafruit_displayio_ssd1306.SSD1306(
@@ -783,7 +865,9 @@ class FoodDetector:
         self.oled_display = OLEDDisplay()
         
         # Initialize TensorFlow Lite food detector
-        self.tflite_detector = TFLiteFoodDetector() if TFLITE_AVAILABLE else None
+        tflite_cfg = self.config.get("tflite", {}) if isinstance(self.config.get("tflite", {}), dict) else {}
+        model_path_cfg = tflite_cfg.get("model_path")
+        self.tflite_detector = TFLiteFoodDetector(model_path=model_path_cfg) if TFLITE_AVAILABLE else None
         
         # Performance optimization flags
         self.low_quality_mode = False
@@ -818,7 +902,8 @@ class FoodDetector:
             "camera_width": 320,  # Reduced for Pi Zero W
             "camera_height": 240,  # Reduced for Pi Zero W
             "detection_confidence": 0.5,
-            "calorie_estimation_model": "llama3-70b-8192",
+            # Use a Groq vision-capable model by default
+            "calorie_estimation_model": "llama-3.2-11b-vision-preview",
             "detection_interval": 3.0,  # Increased interval
             "save_images": False,  # Disabled by default to save storage
             "output_dir": "detections",
@@ -846,6 +931,10 @@ class FoodDetector:
                 with open(config_path, 'r') as f:
                     user_config = json.load(f)
                 default_config.update(user_config)
+                # Environment variable should take precedence if provided
+                env_key = os.getenv("GROQ_API_KEY")
+                if env_key:
+                    default_config["groq_api_key"] = env_key
         except Exception as e:
             logger.warning(f"Could not load config file: {e}. Using defaults.")
             
@@ -854,14 +943,20 @@ class FoodDetector:
     def init_groq_client(self):
         """Initialize Groq client for LLM integration"""
         try:
+            # Prefer env var if present
+            env_key = os.getenv("GROQ_API_KEY", "")
+            if env_key:
+                self.config["groq_api_key"] = env_key
             if not self.config["groq_api_key"]:
-                raise ValueError("Groq API key not found. Set GROQ_API_KEY environment variable.")
+                logger.warning("Groq API key not set; continuing without LLM integration.")
+                self.groq_client = None
+                return
             
             self.groq_client = Groq(api_key=self.config["groq_api_key"])
             logger.info("Groq client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize Groq client: {e}")
-            raise
+            self.groq_client = None
     
     def init_camera(self):
         """Initialize camera for Raspberry Pi (prefer Pi Camera module)"""
@@ -887,8 +982,22 @@ class FoodDetector:
                     
                 except Exception as e:
                     logger.warning(f"Pi Camera initialization failed: {e}")
-            # No OpenCV USB fallback: enforce Pi Camera usage only
-            raise RuntimeError("Pi Camera not available. Please enable the camera interface or install Picamera2.")
+            # Fallback: try USB camera via OpenCV if available
+            if OPENCV_AVAILABLE:
+                try:
+                    cam_index = int(self.config.get("camera_index", 0))
+                    cam = cv2.VideoCapture(cam_index)
+                    cam.set(cv2.CAP_PROP_FRAME_WIDTH, self.config["camera_width"])
+                    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config["camera_height"])
+                    ok, _ = cam.read()
+                    if ok:
+                        self.camera = cam
+                        logger.info("USB camera initialized via OpenCV fallback")
+                        return
+                    cam.release()
+                except Exception as e:
+                    logger.warning(f"OpenCV USB camera fallback failed: {e}")
+            raise RuntimeError("No available camera. Enable Picamera2 or attach USB camera with OpenCV available.")
             
         except Exception as e:
             logger.error(f"Failed to initialize camera: {e}")
@@ -897,10 +1006,15 @@ class FoodDetector:
     def init_detection_models(self):
         """Initialize computer vision models for food detection"""
         try:
-            # Initialize background subtractor for motion detection
-            self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                detectShadows=True, varThreshold=50
-            )
+            # Initialize background subtractor for motion detection (if OpenCV available)
+            self.bg_subtractor = None
+            if OPENCV_AVAILABLE:
+                try:
+                    self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+                        detectShadows=True, varThreshold=50
+                    )
+                except Exception as e:
+                    logger.debug(f"Background subtractor unavailable: {e}")
             
             # Initialize contour detection parameters
             self.contour_params = {
@@ -944,6 +1058,12 @@ class FoodDetector:
                 # Convert to PIL Image (RGB format)
                 frame = Image.fromarray(frame_array)
                 return True, frame
+            elif self.camera is not None and OPENCV_AVAILABLE:
+                ret, frame_bgr = self.camera.read()
+                if not ret or frame_bgr is None:
+                    return False, None
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                return True, Image.fromarray(frame_rgb)
             else:
                 return False, None
         except Exception as e:
@@ -1170,7 +1290,7 @@ class FoodDetector:
                 pil_image = image
             
             # Resize for efficiency (Groq has size limits) - PIL is much faster for this
-            pil_image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            pil_image.thumbnail((512, 512), resample=RESAMPLE_LANCZOS)
             
             # Convert to base64
             buffer = BytesIO()
@@ -1323,6 +1443,8 @@ class FoodDetector:
     def draw_detections(self, frame: np.ndarray, detected_objects: List[Dict], groq_result: Dict) -> np.ndarray:
         """Draw detection results on frame"""
         try:
+            if not OPENCV_AVAILABLE:
+                return frame
             output_frame = frame.copy()
             
             # Draw bounding boxes for detected objects
@@ -1576,17 +1698,36 @@ def create_default_config():
     config = {
         "groq_api_key": "",
         "camera_index": 0,
-        "camera_width": 640,
-        "camera_height": 480,
+        "camera_width": 320,
+        "camera_height": 240,
         "detection_confidence": 0.5,
-        "calorie_estimation_model": "llama3-70b-8192",
-        "detection_interval": 2.0,
-        "save_images": True,
+        "calorie_estimation_model": "llama-3.2-11b-vision-preview",
+        "detection_interval": 3.0,
+        "save_images": False,
         "output_dir": "detections",
         "preprocessing": {
-            "blur_kernel": 5,
-            "brightness_adjustment": 1.2,
-            "contrast_adjustment": 1.1
+            "blur_kernel": 3,
+            "brightness_adjustment": 1.1,
+            "contrast_adjustment": 1.05
+        },
+        "performance": {
+            "max_fps": 10,
+            "frame_skip": 2,
+            "low_quality_threshold": 75,
+            "memory_cleanup_interval": 30
+        },
+        "oled_display": {
+            "width": 128,
+            "height": 64,
+            "update_interval": 1.0,
+            "show_system_info": True
+        },
+        "tflite": {
+            "enabled": True,
+            "model_path": "kagglehub:google/aiy/tfLite/vision-classifier-food-v1",
+            "confidence_threshold": 0.35,
+            "max_detections": 3,
+            "use_fallback_cv": True
         }
     }
     

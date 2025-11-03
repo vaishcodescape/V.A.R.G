@@ -22,23 +22,26 @@ A food detection and calorie estimation system designed for Raspberry Pi Zero W,
 
 ## 📦 Setup & Execution
 
-### Option A — Automated Setup (Recommended)
+### Quick Start — Clone and Auto-Start on Raspberry Pi
 
 ```bash
 # On your Raspberry Pi (Zero W or newer)
-cd /home/pi
-cd V.A.R.G  # or your chosen directory name
+sudo apt update && sudo apt install -y git
 
-# Make deployment script executable and run it
+# Clone the repo (replace <YOUR_REPO_URL> if needed)
+cd /home/pi
+git clone <YOUR_REPO_URL> V.A.R.G
+cd V.A.R.G
+
+# Deploy (creates venv, installs deps, sets up models/service, enables auto-start)
 chmod +x deploy_pi.sh
 ./deploy_pi.sh
 
-# Add your Groq API key
-nano .env
-# GROQ_API_KEY=your_actual_groq_api_key_here
+# Add your Groq API key (optional; LLM features disabled if omitted)
+echo "GROQ_API_KEY=your_actual_groq_api_key_here" > .env
 
-# Optional: tweak configuration
-nano config.json
+# Reboot to apply firmware config and start the service
+sudo reboot
 ```
 
 Run the system:
@@ -47,9 +50,9 @@ Run the system:
 source varg_env/bin/activate
 python3 v.a.r.g.py
 
-# Or run as a service (auto-start on boot)
-sudo systemctl start varg.service
-sudo systemctl enable varg.service
+# Or use the service (auto-start already enabled by deploy_pi.sh)
+sudo systemctl status varg.service
+sudo journalctl -u varg.service -f
 ```
 
 Monitor:
@@ -99,7 +102,7 @@ GROQ_API_KEY=your_groq_api_key_here
   "camera_width": 320,
   "camera_height": 240,
   "detection_confidence": 0.5,
-  "calorie_estimation_model": "llama3-70b-8192",
+  "calorie_estimation_model": "llama-3.2-11b-vision-preview",
   "detection_interval": 3.0,
   "save_images": false,
   "output_dir": "detections",
@@ -122,11 +125,10 @@ GROQ_API_KEY=your_groq_api_key_here
   },
   "tflite": {
     "enabled": true,
-    "model_path": "models/efficientnet_food.tflite",
+    "model_path": "kagglehub:google/aiy/tfLite/vision-classifier-food-v1",
     "confidence_threshold": 0.35,
     "max_detections": 3,
-    "use_fallback_cv": true,
-    "smoothing": { "enabled": true, "window": 3 }
+    "use_fallback_cv": true
   }
 }
 ```
