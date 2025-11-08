@@ -88,21 +88,49 @@ install_system_deps() {
     # Helper: install a package if available; warn and continue if not
     apt_install_safe() {
         local pkg="$1"
-        if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -yq "$pkg"; then
-            print_status "Installed: $pkg"
+		print_status "Installing: $pkg"
+		if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Progress-Fancy=1 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -y --no-install-recommends "$pkg"; then
+			print_status "✅ Installed: $pkg"
             return 0
         else
             print_warning "Package not available or failed: $pkg, retrying with --fix-missing"
             # Retry once with fix-missing and a fresh update
             sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true update -yq >/dev/null 2>&1 || true
-            if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -yq --fix-missing "$pkg"; then
-                print_status "Installed on retry: $pkg"
+			if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Progress-Fancy=1 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -y --no-install-recommends --fix-missing "$pkg"; then
+				print_status "✅ Installed on retry: $pkg"
                 return 0
             fi
             print_warning "Package not available or failed: $pkg (continuing)"
             return 1
         fi
     }
+
+	# Helper: install a batch of packages quickly; fallback to per-package on failure
+	apt_install_batch() {
+		local pkgs=("$@")
+		local count=${#pkgs[@]}
+		if [ "$count" -eq 0 ]; then
+			return 0
+		fi
+		print_step "Installing $count packages in batch (faster)..."
+		printf "%s\n" "${pkgs[@]}" | sed 's/^/- /'
+		if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Progress-Fancy=1 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -y --no-install-recommends "${pkgs[@]}"; then
+			print_status "Batch install completed"
+			return 0
+		fi
+		print_warning "Batch install failed; retrying with --fix-missing"
+		sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true update -yq || true
+		if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Progress-Fancy=1 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -y --no-install-recommends --fix-missing "${pkgs[@]}"; then
+			print_status "Batch install completed on retry"
+			return 0
+		fi
+		print_warning "Batch still failing; falling back to per-package installs"
+		local p
+		for p in "${pkgs[@]}"; do
+			apt_install_safe "$p"
+		done
+		return 0
+	}
 
     # Base packages (lightweight, broadly available)
     BASE_PKGS=(
@@ -126,31 +154,33 @@ install_system_deps() {
         libhdf5-serial-dev
         python3-pyqt5
         python3-h5py
-        libjasper-dev
         i2c-tools
     )
 
-    for p in "${BASE_PKGS[@]}"; do
-        apt_install_safe "$p" >/dev/null
-    done
+	# Install base in batch for speed
+	apt_install_batch "${BASE_PKGS[@]}"
 
     # Media codecs (optional)
     OPTIONAL_MEDIA=(libavcodec-dev libavformat-dev libswscale-dev libxvidcore-dev libx264-dev)
-    for p in "${OPTIONAL_MEDIA[@]}"; do
-        apt_install_safe "$p" >/dev/null
-    done
+	apt_install_batch "${OPTIONAL_MEDIA[@]}"
 
-    # Legacy/renamed packages (skip on modern distros)
+	# Legacy/renamed packages (skip on modern distros)
     LEGACY_PKGS=(libqtgui4 libqt4-test libgtk2.0-dev libhdf5-103)
-    for p in "${LEGACY_PKGS[@]}"; do
-        apt_install_safe "$p" >/dev/null || true
-    done
+	for p in "${LEGACY_PKGS[@]}"; do
+		apt_install_safe "$p" || true
+	done
+
+	# Occasionally missing on newer releases; treat as optional
+	OPTIONAL_MISC=(libjasper-dev)
+	for p in "${OPTIONAL_MISC[@]}"; do
+		apt_install_safe "$p" || true
+	done
 
     # Picamera2 (fallback to libcamera if unavailable)
-    if ! apt_install_safe python3-picamera2 >/dev/null; then
+	if ! apt_install_safe python3-picamera2; then
         print_warning "Falling back to libcamera tools (USB/OpenCV fallback still supported)"
-        apt_install_safe python3-libcamera >/dev/null || true
-        apt_install_safe libcamera-apps >/dev/null || true
+		apt_install_safe python3-libcamera || true
+		apt_install_safe libcamera-apps || true
     fi
 
     print_status "System dependencies step completed"

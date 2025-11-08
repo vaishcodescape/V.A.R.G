@@ -124,6 +124,7 @@ class DependencyManager:
             'libjpeg-dev',
             'libpng-dev',
             'libtiff-dev',
+            'libv4l-dev',
             'libfontconfig1-dev',
             'libcairo2-dev',
             'libgdk-pixbuf-2.0-dev',
@@ -139,6 +140,7 @@ class DependencyManager:
         ]
         
         try:
+            logger.info("Updating APT package lists...")
             # Update package list
             subprocess.run([
                 'sudo', 'apt-get',
@@ -149,17 +151,22 @@ class DependencyManager:
             ], check=True)
             
             # Install packages
+            logger.info("Installing system packages (batch, no recommends):")
+            for p in system_packages:
+                logger.info(f" - {p}")
             cmd = [
                 'sudo', 'apt-get',
                 '-o', 'Acquire::Retries=3',
                 '-o', 'Acquire::http::Timeout=30',
                 '-o', 'Acquire::ForceIPv4=true',
+                '-o', 'Dpkg::Progress-Fancy=1',
                 'install', '-y'
-            ] + system_packages
+            ] + ['--no-install-recommends'] + system_packages
             try:
                 subprocess.run(cmd, check=True)
             except subprocess.CalledProcessError:
                 # Retry with --fix-missing once
+                logger.warning("Batch install failed; retrying with --fix-missing after update")
                 subprocess.run([
                     'sudo', 'apt-get',
                     '-o', 'Acquire::Retries=3',
@@ -168,6 +175,7 @@ class DependencyManager:
                     'update', '-y'
                 ], check=True)
                 subprocess.run(cmd + ['--fix-missing'], check=True)
+                logger.info("Batch install succeeded on retry")
             
             logger.info("System dependencies installed successfully")
             return True
