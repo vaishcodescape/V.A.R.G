@@ -37,7 +37,7 @@ check_raspberry_pi() {
         exit 1
     fi
     
-    PI_MODEL=$(cat /proc/device-tree/model)
+    PI_MODEL=$(tr -d '\0' </proc/device-tree/model)
     print_status "Detected: $PI_MODEL"
 }
 
@@ -83,15 +83,22 @@ optimize_pi_zero() {
 install_system_deps() {
     print_step "Installing system dependencies..."
     
-    sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true update -yq
 
     # Helper: install a package if available; warn and continue if not
     apt_install_safe() {
         local pkg="$1"
-        if sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq "$pkg"; then
+        if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -yq "$pkg"; then
             print_status "Installed: $pkg"
             return 0
         else
+            print_warning "Package not available or failed: $pkg, retrying with --fix-missing"
+            # Retry once with fix-missing and a fresh update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true update -yq >/dev/null 2>&1 || true
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::ForceIPv4=true install -yq --fix-missing "$pkg"; then
+                print_status "Installed on retry: $pkg"
+                return 0
+            fi
             print_warning "Package not available or failed: $pkg (continuing)"
             return 1
         fi
@@ -102,16 +109,18 @@ install_system_deps() {
         python3-pip
         python3-venv
         python3-dev
-        libatlas-base-dev
+        libopenblas-dev
+        liblapack-dev
         libjpeg-dev
         libpng-dev
         libtiff-dev
         libv4l-dev
         libfontconfig1-dev
         libcairo2-dev
-        libgdk-pixbuf2.0-dev
+        libgdk-pixbuf-2.0-dev
         libpango1.0-dev
         libgtk-3-dev
+        pkg-config
         gfortran
         libhdf5-dev
         libhdf5-serial-dev

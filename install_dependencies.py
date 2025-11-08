@@ -119,12 +119,14 @@ class DependencyManager:
         
         system_packages = [
             'python3-dev',
-            'libatlas-base-dev',
+            'libopenblas-dev',
+            'liblapack-dev',
             'libjpeg-dev',
             'libpng-dev',
             'libtiff-dev',
             'libfontconfig1-dev',
             'libcairo2-dev',
+            'libgdk-pixbuf-2.0-dev',
             'libpango1.0-dev',
             'libglib2.0-dev',
             'libgtk-3-dev',
@@ -138,11 +140,34 @@ class DependencyManager:
         
         try:
             # Update package list
-            subprocess.run(['sudo', 'apt', 'update'], check=True)
+            subprocess.run([
+                'sudo', 'apt-get',
+                '-o', 'Acquire::Retries=3',
+                '-o', 'Acquire::http::Timeout=30',
+                '-o', 'Acquire::ForceIPv4=true',
+                'update', '-y'
+            ], check=True)
             
             # Install packages
-            cmd = ['sudo', 'apt', 'install', '-y'] + system_packages
-            subprocess.run(cmd, check=True)
+            cmd = [
+                'sudo', 'apt-get',
+                '-o', 'Acquire::Retries=3',
+                '-o', 'Acquire::http::Timeout=30',
+                '-o', 'Acquire::ForceIPv4=true',
+                'install', '-y'
+            ] + system_packages
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError:
+                # Retry with --fix-missing once
+                subprocess.run([
+                    'sudo', 'apt-get',
+                    '-o', 'Acquire::Retries=3',
+                    '-o', 'Acquire::http::Timeout=30',
+                    '-o', 'Acquire::ForceIPv4=true',
+                    'update', '-y'
+                ], check=True)
+                subprocess.run(cmd + ['--fix-missing'], check=True)
             
             logger.info("System dependencies installed successfully")
             return True
