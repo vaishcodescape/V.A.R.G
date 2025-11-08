@@ -3,8 +3,8 @@
 # V.A.R.G Deployment Script for Raspberry Pi Zero W
 # Optimized for direct deployment without API overhead
 
-echo "🚀 V.A.R.G Deployment for Raspberry Pi Zero W"
-echo "=============================================="
+echo "V.A.R.G Deployment for Raspberry Pi Zero W"
+echo "==========================================="
 
 # Colors for output
 RED='\033[0;31m'
@@ -273,7 +273,7 @@ create_startup_script() {
 #!/bin/bash
 
 # V.A.R.G Startup Script
-echo "🤖 Starting V.A.R.G Food Detection System..."
+echo "Starting V.A.R.G Food Detection System..."
 
 # Activate virtual environment
 source varg_env/bin/activate
@@ -292,7 +292,7 @@ if [ ! -f ".env" ]; then
 fi
 
 # Start V.A.R.G
-echo "🚀 Launching V.A.R.G..."
+echo "Launching V.A.R.G..."
 python3 v.a.r.g.py
 EOF
     
@@ -376,7 +376,7 @@ EOF
     create_monitoring_script
     
     echo ""
-    print_status "✅ V.A.R.G deployment complete!"
+    print_status "V.A.R.G deployment complete!"
     echo ""
     echo "🔧 Next Steps:"
     echo "1. Edit .env and set GROQ_API_KEY (optional)"
