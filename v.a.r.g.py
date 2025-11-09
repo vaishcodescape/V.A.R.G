@@ -316,6 +316,39 @@ class OLEDDisplay:
         else:
             logger.warning("OLED display not available")
     
+    def show_message(self, lines):
+        """Show a simple multi-line centered message on the OLED."""
+        if not OLED_AVAILABLE or not self.display:
+            return
+        try:
+            img = Image.new('1', (self.width, self.height), 0)
+            draw = ImageDraw.Draw(img)
+            # Choose fonts
+            title_font = self.font or ImageFont.load_default()
+            text_font = self.small_font or ImageFont.load_default()
+            # Compute total height
+            heights = []
+            for i, line in enumerate(lines):
+                f = title_font if i == 0 else text_font
+                _, h = f.getsize(line)
+                heights.append(h)
+            total_h = sum(heights) + max(0, (len(lines) - 1)) * 2
+            y = max(0, (self.height - total_h) // 2)
+            # Draw lines
+            for i, line in enumerate(lines):
+                f = title_font if i == 0 else text_font
+                w, h = f.getsize(line)
+                x = max(0, (self.width - w) // 2)
+                draw.text((x, y), line, font=f, fill=1)
+                y += h + 2
+            self.update_display(img)
+        except Exception as e:
+            logger.error(f"Error showing OLED message: {e}")
+    
+    def show_startup(self):
+        """Show startup splash to indicate process start."""
+        self.show_message(["V.A.R.G", "Food Calorie", "Detector"])
+    
     def init_display(self):
         """Initialize the OLED display"""
         try:
@@ -504,6 +537,11 @@ class FoodDetector:
         
         # Initialize OLED display
         self.oled_display = OLEDDisplay()
+        # Show startup splash
+        try:
+            self.oled_display.show_startup()
+        except Exception:
+            pass
         
         # Remote inference client (optional)
         self.remote_client = RemoteInferenceClient(
@@ -616,6 +654,12 @@ class FoodDetector:
                     cam.release()
                 except Exception as e:
                     logger.warning(f"OpenCV USB camera fallback failed: {e}")
+            # Show on OLED before raising
+            try:
+                if self.oled_display and self.oled_display.display:
+                    self.oled_display.show_message(["Camera not found", "Check cable &", "raspi-config"])
+            except Exception:
+                pass
             raise RuntimeError("No available camera. Enable Picamera2 or attach USB camera with OpenCV available.")
             
         except Exception as e:
