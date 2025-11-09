@@ -61,17 +61,24 @@ try:
     import board
     import busio
     import digitalio
-    import adafruit_displayio_ssd1306
-    try:
-        import adafruit_displayio_ssd1309 as ssd1309_driver  # optional, used if available
-        SSD1309_AVAILABLE = True
-    except Exception:
-        SSD1309_AVAILABLE = False
     import displayio
+    try:
+        # displayio SSD1306 path (fallback)
+        import adafruit_displayio_ssd1306
+        DISPLAYIO_SSD1306_AVAILABLE = True
+    except Exception:
+        DISPLAYIO_SSD1306_AVAILABLE = False
     OLED_AVAILABLE = True
 except ImportError:
     OLED_AVAILABLE = False
     logging.warning("OLED display libraries not available")
+
+# Optional: Waveshare SPI OLED driver (SSD1309/SSD1306 variants)
+try:
+    from waveshare_OLED import OLED_1in51 as WS_OLED_1in51
+    WAVESHARE_AVAILABLE = True
+except Exception:
+    WAVESHARE_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -357,23 +364,33 @@ class OLEDDisplay:
         self.show_message(["V.A.R.G", "Food Calorie Detector"])
     
     def init_display(self):
-        """Initialize the OLED display over SPI (DIN/MOSI, CLK/SCLK, CS, DC, RST)."""
+        """Initialize the OLED display using Waveshare SPI driver if available; else displayio SSD1306 over SPI."""
         try:
-            displayio.release_displays()
-            # SPI wiring defaults (change GPIOs here if wired differently)
-            spi = busio.SPI(board.SCLK, board.MOSI)  # no MISO for OLED
-            tft_cs = digitalio.DigitalInOut(getattr(board, "CE0"))
-            tft_dc = digitalio.DigitalInOut(getattr(board, "D25"))
-            tft_rst = digitalio.DigitalInOut(getattr(board, "D24"))
-            display_bus = displayio.FourWire(spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=8000000)
-            # Prefer SSD1309 if available (common on 1.3/1.5\" SPI monochrome panels), fallback to SSD1306.
-            if 'SSD1309_AVAILABLE' in globals() and SSD1309_AVAILABLE:
+            # Prefer Waveshare driver for 1.51\" SPI OLEDs (SSD1309/SSD1306)
+            if WAVESHARE_AVAILABLE:
+                self.ws = WS_OLED_1in51.OLED_1in51()
+                self.ws.Init()
+                self.ws.clear()
+                # Use panel-reported dimensions
                 try:
-                    self.display = ssd1309_driver.SSD1309(display_bus, width=self.width, height=self.height)
-                except Exception as _e:
-                    self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
+                    self.width = getattr(self.ws, "width", self.width)
+                    self.height = getattr(self.ws, "height", self.height)
+                except Exception:
+                    pass
+                self.display = self.ws  # mark as initialized
+                logger.info("OLED display initialized via Waveshare driver (SPI)")
             else:
+                # Fallback to displayio SSD1306 over SPI
+                displayio.release_displays()
+                spi = busio.SPI(board.SCLK, board.MOSI)  # no MISO for OLED
+                tft_cs = digitalio.DigitalInOut(getattr(board, "CE0"))
+                tft_dc = digitalio.DigitalInOut(getattr(board, "D25"))
+                tft_rst = digitalio.DigitalInOut(getattr(board, "D24"))
+                display_bus = displayio.FourWire(spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=4000000)
+                if not DISPLAYIO_SSD1306_AVAILABLE:
+                    raise RuntimeError("displayio SSD1306 driver not available and Waveshare driver not found")
                 self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
+                logger.info("OLED display initialized via displayio SSD1306 (SPI)")
             # Load fonts
             try:
                 self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
@@ -381,7 +398,6 @@ class OLEDDisplay:
             except (OSError, IOError):
                 self.font = ImageFont.load_default()
                 self.small_font = ImageFont.load_default()
-            logger.info("OLED display (SPI) initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize OLED display (SPI): {e}")
             self.display = None
@@ -454,24 +470,24 @@ class OLEDDisplay:
             return
         
         try:
-            # Convert PIL image to displayio bitmap
-            bitmap = displayio.Bitmap(self.width, self.height, 2)
-            
-            for y in range(self.height):
-                for x in range(self.width):
-                    pixel = image.getpixel((x, y))
-                    bitmap[x, y] = 1 if pixel else 0
-            
-            # Create palette and tile grid
-            palette = displayio.Palette(2)
-            palette[0] = 0x000000  # Black
-            palette[1] = 0xADD8E6  # Light Blue for active pixels (monochrome displays will still show white)
-            
-            tile_grid = displayio.TileGrid(bitmap, pixel_shader=palette)
-            group = displayio.Group()
-            group.append(tile_grid)
-            
-            self.display.show(group)
+            if WAVESHARE_AVAILABLE and isinstance(self.display, WS_OLED_1in51.OLED_1in51):
+                # Waveshare driver expects rotated buffer for 1.51\" panel
+                frame = image.convert('1').rotate(180)
+                self.display.ShowImage(self.display.getbuffer(frame))
+            else:
+                # displayio path
+                bitmap = displayio.Bitmap(self.width, self.height, 2)
+                for y in range(self.height):
+                    for x in range(self.width):
+                        pixel = image.getpixel((x, y))
+                        bitmap[x, y] = 1 if pixel else 0
+                palette = displayio.Palette(2)
+                palette[0] = 0x000000
+                palette[1] = 0xFFFFFF
+                tile_grid = displayio.TileGrid(bitmap, pixel_shader=palette)
+                group = displayio.Group()
+                group.append(tile_grid)
+                self.display.show(group)
             
         except Exception as e:
             logger.error(f"Error updating OLED display: {e}")
@@ -570,6 +586,7 @@ class FoodDetector:
         self.last_food_detection_time = 0
         self.food_detection_cooldown = 1.0  # Minimum time between food detections
         self.llm_processing = False
+        self.camera_unavailable = False
         
         # Initialize camera (Pi Camera preferred)
         self.init_camera()
@@ -661,7 +678,7 @@ class FoodDetector:
                     cam.release()
                 except Exception as e:
                     logger.warning(f"OpenCV USB camera fallback failed: {e}")
-            # Show on OLED before raising
+            # Show on OLED and mark unavailable
             try:
                 if self.oled_display and self.oled_display.display:
                     self.oled_display.show_message(["Camera not found", "Check cable &", "raspi-config"])
@@ -669,11 +686,13 @@ class FoodDetector:
                     time.sleep(2)
             except Exception:
                 pass
-            raise RuntimeError("No available camera. Enable Picamera2 or attach USB camera with OpenCV available.")
+            self.camera_unavailable = True
+            return
             
         except Exception as e:
             logger.error(f"Failed to initialize camera: {e}")
-            raise
+            self.camera_unavailable = True
+            return
     
     def init_detection_models(self):
         """Initialize computer vision models for food detection"""
@@ -962,12 +981,27 @@ class FoodDetector:
             last_memory_cleanup = 0
             frame_count = 0
             last_scene_sig = None
+            last_camera_retry = 0
             
             while True:
                 current_time = time.time()
                 
                 # Update performance metrics
                 cpu_usage, memory_usage, fps = self.performance_monitor.update_metrics()
+                
+                # If camera is unavailable, retry periodically and keep OLED message visible
+                if (self.picamera2 is None and (not OPENCV_AVAILABLE or self.camera is None)):
+                    if current_time - last_camera_retry > 5:
+                        logger.warning("Camera unavailable; retrying initialization...")
+                        self.init_camera()
+                        last_camera_retry = current_time
+                    try:
+                        if self.oled_display and self.oled_display.display:
+                            self.oled_display.show_message(["Camera not found", "Check cable &", "raspi-config"])
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+                    continue
                 
                 # Capture frame
                 ret, frame = self.capture_frame()
