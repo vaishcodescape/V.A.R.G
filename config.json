@@ -23,7 +23,14 @@
     "width": 128,
     "height": 64,
     "update_interval": 1.0,
-    "show_system_info": true
+    "show_system_info": true,
+    "spi": {
+      "port": 0,
+      "cs_pin": "CE0",
+      "dc_pin": "D25",
+      "rst_pin": "D24",
+      "baudrate": 2000000
+    }
   },
   "tflite": {
     "enabled": true,

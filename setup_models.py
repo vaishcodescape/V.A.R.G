@@ -224,6 +224,14 @@ def main():
     # List available models
     setup.list_models()
     
+    # Automatically select recommended model in non-interactive environments
+    import sys
+    if not sys.stdout.isatty():
+        logger.info("Non-interactive environment detected, setting up recommended model...")
+        setup.setup_recommended_model()
+        logger.info("\n✅ Model setup complete!")
+        return
+
     # Ask user what to do
     print("\n🔧 Setup Options:")
     print("1. Setup recommended model (EfficientNet Lite - best for Pi Zero W)")

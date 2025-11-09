@@ -318,9 +318,11 @@ class RemoteInferenceClient:
 class OLEDDisplay:
     """Handles transparent OLED display for showing detection results"""
     
-    def __init__(self, width=128, height=64):
-        self.width = width
-        self.height = height
+    def __init__(self, config: Dict):
+        """Initialize OLED with a config dictionary."""
+        self.config = config
+        self.width = self.config.get("width", 128)
+        self.height = self.config.get("height", 64)
         self.display = None
         self.font = None
         self.small_font = None
@@ -364,40 +366,12 @@ class OLEDDisplay:
         self.show_message(["V.A.R.G", "Food Calorie Detector"])
     
     def init_display(self):
-        """Initialize the OLED display using Waveshare SPI driver if available; else displayio SSD1306 over SPI."""
+        """Initialize the OLED display using SPI."""
+        logger.info("Initializing OLED display with type: SPI")
+        
         try:
-            # Prefer Waveshare driver for 1.51\" SPI OLEDs (SSD1309/SSD1306)
-            if WAVESHARE_AVAILABLE:
-                self.ws = WS_OLED_1in51.OLED_1in51()
-                self.ws.Init()
-                self.ws.clear()
-                # Use panel-reported dimensions
-                try:
-                    self.width = getattr(self.ws, "width", self.width)
-                    self.height = getattr(self.ws, "height", self.height)
-                except Exception:
-                    pass
-                self.display = self.ws  # mark as initialized
-                logger.info("OLED display initialized via Waveshare driver (SPI)")
-            else:
-                # Fallback to displayio SSD1306 over SPI
-                displayio.release_displays()
-                spi = busio.SPI(board.SCLK, board.MOSI)  # no MISO for OLED
-                # Allow CE0/CE1 selection via env var OLED_CS (default CE0)
-                cs_name = os.getenv("OLED_CS", "CE0")
-                try:
-                    cs_pin = getattr(board, cs_name)
-                except Exception:
-                    cs_pin = getattr(board, "CE0")
-                tft_cs = digitalio.DigitalInOut(cs_pin)
-                tft_dc = digitalio.DigitalInOut(getattr(board, "D25"))
-                tft_rst = digitalio.DigitalInOut(getattr(board, "D24"))
-                # Conservative baudrate for stability
-                display_bus = displayio.FourWire(spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=2000000)
-                if not DISPLAYIO_SSD1306_AVAILABLE:
-                    raise RuntimeError("displayio SSD1306 driver not available and Waveshare driver not found")
-                self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
-                logger.info("OLED display initialized via displayio SSD1306 (SPI)")
+            self.init_spi_display()
+
             # Load fonts
             try:
                 self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
@@ -408,7 +382,51 @@ class OLEDDisplay:
         except Exception as e:
             logger.error(f"Failed to initialize OLED display (SPI): {e}")
             self.display = None
-    
+
+    def init_spi_display(self):
+        """Initialize SPI-based OLED display."""
+        # Prefer Waveshare driver for 1.51" SPI OLEDs (SSD1309/SSD1306)
+        if WAVESHARE_AVAILABLE:
+            self.ws = WS_OLED_1in51.OLED_1in51()
+            self.ws.Init()
+            self.ws.clear()
+            # Use panel-reported dimensions
+            try:
+                self.width = getattr(self.ws, "width", self.width)
+                self.height = getattr(self.ws, "height", self.height)
+            except Exception:
+                pass
+            self.display = self.ws  # mark as initialized
+            logger.info("OLED display initialized via Waveshare driver (SPI)")
+        else:
+            # Fallback to displayio SSD1306 over SPI
+            displayio.release_displays()
+            spi_config = self.config.get("spi", {})
+            cs_pin_name = spi_config.get("cs_pin", "CE0")
+            dc_pin_name = spi_config.get("dc_pin", "D25")
+            rst_pin_name = spi_config.get("rst_pin", "D24")
+            baudrate = spi_config.get("baudrate", 2000000)
+
+            spi = busio.SPI(board.SCLK, board.MOSI)
+            
+            try:
+                cs_pin = getattr(board, cs_pin_name)
+            except AttributeError:
+                logger.error(f"Invalid CS pin name '{cs_pin_name}', defaulting to CE0.")
+                cs_pin = board.CE0
+
+            tft_cs = digitalio.DigitalInOut(cs_pin)
+            tft_dc = digitalio.DigitalInOut(getattr(board, dc_pin_name))
+            tft_rst = digitalio.DigitalInOut(getattr(board, rst_pin_name))
+
+            display_bus = displayio.FourWire(
+                spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=baudrate
+            )
+            if not DISPLAYIO_SSD1306_AVAILABLE:
+                raise RuntimeError("displayio SSD1306 driver not available and Waveshare driver not found")
+            self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
+            logger.info("OLED display initialized via displayio SSD1306 (SPI)")
+
     def create_food_display(self, foods_data: Dict, food_detected: bool = False, llm_processing: bool = False) -> Image.Image:
         """Create display image showing only food name and calories."""
         img = Image.new('1', (self.width, self.height), 0)  # 1-bit image for OLED
@@ -564,7 +582,7 @@ class FoodDetector:
         self.performance_monitor = PerformanceMonitor()
         
         # Initialize OLED display
-        self.oled_display = OLEDDisplay()
+        self.oled_display = OLEDDisplay(config=self.config.get("oled_display", {}))
         # Show startup splash
         try:
             self.oled_display.show_startup()

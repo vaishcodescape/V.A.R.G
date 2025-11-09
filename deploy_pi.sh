@@ -65,6 +65,10 @@ optimize_pi_zero() {
     sudo raspi-config nonint do_i2c 0
     print_status "I2C interface enabled"
     
+    # Enable SPI for OLED display
+    sudo raspi-config nonint do_spi 0
+    print_status "SPI interface enabled"
+    
     # Optimize for performance (use cautiously on Pi Zero W)
     if ! grep -q "^arm_freq=1000" "$CONFIG_FILE"; then
         echo "arm_freq=1000" | sudo tee -a "$CONFIG_FILE" >/dev/null
