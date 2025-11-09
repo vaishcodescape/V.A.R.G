@@ -11,6 +11,7 @@ import json
 import time
 import logging
 import subprocess
+import importlib.util
 from pathlib import Path
 
 # Configure logging
@@ -91,11 +92,12 @@ class SystemValidator:
         
         # Required packages
         required_packages = [
-            'numpy', 'PIL', 'psutil', 'groq'
+            'numpy', 'PIL', 'psutil', 'requests'
         ]
         
         # Optional packages
         optional_packages = [
+            'groq',
             'skimage', 'tflite_runtime', 'tensorflow', 'cv2'
         ]
         
@@ -234,8 +236,18 @@ class SystemValidator:
             'client_init': False,
             'api_key_present': False,
             'connection_test': False,
-            'response_test': False
+            'response_test': False,
+            'skipped': False,
+            'skip_reason': ''
         }
+
+        groq_spec = importlib.util.find_spec('groq')
+        if groq_spec is None:
+            print("⚠️  Groq SDK not installed; skipping Groq API validation (optional feature)")
+            api_results['skipped'] = True
+            api_results['skip_reason'] = 'groq_sdk_missing'
+            self.validation_results['api'] = api_results
+            return True
         
         try:
             # Check if API key is available
@@ -287,11 +299,16 @@ class SystemValidator:
                     # This might be due to network issues, not necessarily a problem
                     
             else:
-                print("❌ Groq API key not found or invalid")
-                print("   Please set GROQ_API_KEY in .env file")
+                print("⚠️  Groq API key not found; skipping Groq API validation (optional feature)")
+                api_results['skipped'] = True
+                api_results['skip_reason'] = 'missing_api_key'
+                self.validation_results['api'] = api_results
+                return True
         
         except Exception as e:
             print(f"❌ Groq API validation failed: {e}")
+            self.validation_results['api'] = api_results
+            return False
         
         self.validation_results['api'] = api_results
         return api_results['api_key_present'] and api_results['client_init']

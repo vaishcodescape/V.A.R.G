@@ -1,47 +1,13 @@
-# V.A.R.G - Visual Automated Recipe & Grocery
-# Requirements for Raspberry Pi Zero W Food Detection System
-# Optimized for minimal resource usage
+# V.A.R.G - Raspberry Pi Zero W Minimal Requirements
+# Only keep packages available and lightweight on ARMv6
 
-# Core Python packages
-# NOTE: On Raspberry Pi Zero W (armv6l), install via apt instead of pip:
-#   sudo apt install -y python3-numpy python3-pil
-numpy==1.21.6; platform_system!="Linux" or platform_machine!="armv6l"
-Pillow==9.5.0; platform_system!="Linux" or platform_machine!="armv6l"
+# NOTE: On Pi Zero W, prefer system packages via apt:
+#   sudo apt install -y python3-numpy python3-pil python3-psutil python3-requests
+# OpenCV should be installed via apt:
+#   sudo apt install -y python3-opencv
 
-# Computer vision (lightweight alternative to OpenCV)
-# Skip on armv6l to avoid heavy builds on Pi Zero W
-scikit-image==0.19.3; platform_machine!="armv6l"
-
-# TensorFlow Lite runtime (Linux ARM only). Not installed on macOS/Windows.
-# Note: Official wheels are available for armv7l and aarch64. Pi Zero W (armv6l)
-# typically lacks official wheels; the app will gracefully fall back to CV.
-tflite-runtime>=2.5.0; platform_system=="Linux" and (platform_machine=="armv7l" or platform_machine=="aarch64")
-
-# macOS optional (commented):
-# tensorflow-macos>=2.12.0; platform_system=="Darwin"
-
-# LLM integration
-groq>=0.4.0,<1.0.0
-kagglehub>=0.2.3
-
-# System monitoring and utilities
+numpy>=1.19.0,<1.26.0
+Pillow>=8.0.0,<11.0.0
 psutil>=5.8.0,<6.0.0
 python-dotenv>=0.19.0,<2.0.0
-
-# Raspberry Pi specific libraries
-# Picamera2 is installed via apt in deploy_pi.sh (more reliable than pip).
-RPi.GPIO>=0.7.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
-
-# OLED Display support (Adafruit CircuitPython libraries)
-adafruit-circuitpython-displayio-ssd1306>=1.5.0,<2.0.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
-adafruit-circuitpython-display-text>=2.25.0,<3.0.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
-adafruit-blinka>=8.0.0,<9.0.0; platform_system=="Linux" and (platform_machine=="armv6l" or platform_machine=="armv7l" or platform_machine=="aarch64")
-
-
-# Development dependencies (optional - uncomment for development)
-# pytest>=7.0.0,<8.0.0
-# black>=22.0.0,<24.0.0
-# flake8>=4.0.0,<7.0.0
-
-# Alternative lightweight packages for development/testing on non-Pi systems (optional)
-# fake-rpi>=0.7.0; platform_system!="Linux"
+requests>=2.25.0,<3.0.0

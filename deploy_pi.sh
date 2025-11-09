@@ -137,44 +137,25 @@ install_system_deps() {
         python3-pip
         python3-venv
         python3-dev
-        libopenblas-dev
-        liblapack-dev
+        python3-numpy
+        python3-pil
+        python3-psutil
+        python3-requests
+        python3-dotenv
+        python3-picamera2
+        libatlas-base-dev
         libjpeg-dev
-        libpng-dev
-        libtiff-dev
-        libv4l-dev
-        libfontconfig1-dev
-        libcairo2-dev
-        libgdk-pixbuf-2.0-dev
-        libpango1.0-dev
-        libgtk-3-dev
-        pkg-config
-        gfortran
-        libhdf5-dev
-        libhdf5-serial-dev
-        python3-pyqt5
-        python3-h5py
+        zlib1g-dev
         i2c-tools
+        fonts-dejavu-core
     )
 
-	# Install base in batch for speed
-	apt_install_batch "${BASE_PKGS[@]}"
+    # Install base in batch for speed
+    apt_install_batch "${BASE_PKGS[@]}"
 
-    # Media codecs (optional)
-    OPTIONAL_MEDIA=(libavcodec-dev libavformat-dev libswscale-dev libxvidcore-dev libx264-dev)
-	apt_install_batch "${OPTIONAL_MEDIA[@]}"
-
-	# Legacy/renamed packages (skip on modern distros)
-    LEGACY_PKGS=(libqtgui4 libqt4-test libgtk2.0-dev libhdf5-103)
-	for p in "${LEGACY_PKGS[@]}"; do
-		apt_install_safe "$p" || true
-	done
-
-	# Occasionally missing on newer releases; treat as optional
-	OPTIONAL_MISC=(libjasper-dev)
-	for p in "${OPTIONAL_MISC[@]}"; do
-		apt_install_safe "$p" || true
-	done
+    # Optional but useful packages (skip gracefully if unavailable/heavy)
+    OPTIONAL_MEDIA=(python3-opencv)
+    apt_install_batch "${OPTIONAL_MEDIA[@]}"
 
     # Picamera2 (fallback to libcamera if unavailable)
 	if ! apt_install_safe python3-picamera2; then
@@ -191,19 +172,63 @@ setup_python_env() {
     print_step "Setting up Python environment..."
     
     # Create virtual environment
-    python3 -m venv varg_env
+	# Share apt-provided libraries (numpy/Pillow/etc.) with the venv to avoid heavy pip builds
+	python3 -m venv --system-site-packages varg_env
     source varg_env/bin/activate
     
-    # Upgrade pip
-    pip install --upgrade pip
+	# Configure pip for Raspberry Pi (faster, fewer builds)
+	export PIP_DISABLE_PIP_VERSION_CHECK=1
+	export PIP_DEFAULT_TIMEOUT=60
+	export PIP_NO_CACHE_DIR=1
+	# Prioritize PiWheels; fall back to PyPI if not found
+	export PIP_INDEX_URL="https://www.piwheels.org/simple"
+	export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
+	# Reduce build-time threading on low-RAM devices
+	export OPENBLAS_NUM_THREADS=1
+	export OMP_NUM_THREADS=1
+	
+	# Common pip flags for all installs
+	PIP_FLAGS=(--prefer-binary --no-cache-dir --no-compile --progress-bar on)
+	PIP_FLAGS_ONLYBIN=(--only-binary :all:)
+	
+	# Upgrade build tooling with safe flags
+	print_status "Upgrading pip, setuptools, and wheel..."
+	if ! pip install "${PIP_FLAGS[@]}" --upgrade pip setuptools wheel; then
+		print_warning "Build tooling upgrade failed; retrying without build isolation"
+		pip install "${PIP_FLAGS[@]}" --upgrade --no-build-isolation pip setuptools wheel || true
+	fi
     
     # Use our dependency manager for robust installation
     print_status "Running V.A.R.G dependency manager..."
-    python3 install_dependencies.py
+	if ! python3 install_dependencies.py; then
+		print_warning "Dependency manager encountered errors; continuing with requirements install"
+	fi
     
     # Install from requirements.txt as backup
     print_status "Installing from requirements.txt..."
-    pip install -r requirements.txt
+	if [ -f "requirements.txt" ]; then
+		# Try wheels-only first for speed; then relax constraints
+		if ! pip install "${PIP_FLAGS[@]}" "${PIP_FLAGS_ONLYBIN[@]}" -r requirements.txt; then
+			print_warning "requirements.txt install failed; retrying with --no-build-isolation"
+			if ! pip install "${PIP_FLAGS[@]}" --no-build-isolation -r requirements.txt; then
+				print_warning "Falling back to per-package installation from requirements.txt"
+				# Install line-by-line to isolate failures and show progress
+				grep -Ev '^\s*#|^\s*$' requirements.txt | while read -r req; do
+					print_status "Installing Python package: $req"
+					# Try wheels-only first
+					if pip install "${PIP_FLAGS[@]}" "${PIP_FLAGS_ONLYBIN[@]}" "$req"; then
+						print_status "✅ Installed: $req"
+					else
+						print_warning "Failed: $req, retrying without build isolation"
+						# Relax both only-binary and build isolation as last resort
+						pip install "${PIP_FLAGS[@]}" --no-build-isolation "$req" || print_warning "Skipped after retry: $req"
+					fi
+				done
+			fi
+		fi
+	else
+		print_warning "No requirements.txt found; skipping"
+	fi
     
     print_status "Python environment setup complete"
 }

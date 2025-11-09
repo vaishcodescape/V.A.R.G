@@ -2,8 +2,8 @@
 """
 V.A.R.G - Visual Automated Recipe & Grocery
 Food Detection and Calorie Estimation System for Raspberry Pi Zero W
-Using OpenCV, Computer Vision, Groq LLM Integration, and Transparent OLED Display
-Optimized for Pi Camera Module and minimal resource usage
+Using OpenCV (capture), lightweight PIL/numpy processing, optional remote inference via HTTP,
+and Transparent OLED Display. Optimized for Pi Camera Module and minimal resource usage.
 """
 
 import numpy as np
@@ -13,13 +13,12 @@ import logging
 from datetime import datetime
 from typing import Dict, List
 import os
-from groq import Groq
+import requests
 import base64
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import queue
 import gc
-import threading
 from collections import deque
 import psutil
 
@@ -36,38 +35,10 @@ try:
 except Exception:
     pass
 
-# Try to import lightweight computer vision libraries
-try:
-    from skimage import measure, morphology, color
-    from skimage.feature import canny
-    from skimage.util import img_as_ubyte
-    SKIMAGE_AVAILABLE = True
-except ImportError:
-    SKIMAGE_AVAILABLE = False
-    logging.warning("scikit-image not available, using PIL-based processing")
+# Heavy scientific CV libs like scikit-image are not used on Pi Zero W
 
-# Try to import TensorFlow Lite for food detection models
-try:
-    # Try TensorFlow Lite runtime first (smaller package)
-    import tflite_runtime.interpreter as tflite
-    tf = None  # We'll use tflite directly
-    TFLITE_AVAILABLE = True
-    TFLITE_RUNTIME_ONLY = True
-    logging.info("TensorFlow Lite runtime available for food detection models")
-except ImportError:
-    try:
-        # Fallback to full TensorFlow
-        import tensorflow as tf
-        tflite = None
-        TFLITE_AVAILABLE = True
-        TFLITE_RUNTIME_ONLY = False
-        logging.info("TensorFlow (full) available for food detection models")
-    except ImportError:
-        tf = None
-        tflite = None
-        TFLITE_AVAILABLE = False
-        TFLITE_RUNTIME_ONLY = False
-        logging.warning("TensorFlow Lite not available, using traditional CV methods")
+# TensorFlow/TFLite are disabled on Pi Zero W
+TFLITE_AVAILABLE = False
 
 # Fallback to minimal OpenCV only for camera operations
 try:
@@ -107,7 +78,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class LightweightCV:
-    """Lightweight computer vision operations using PIL and scikit-image"""
+    """Lightweight computer vision operations using PIL and numpy"""
     
     @staticmethod
     def pil_to_numpy(pil_image):
@@ -118,21 +89,10 @@ class LightweightCV:
     def numpy_to_pil(np_array):
         """Convert numpy array to PIL image"""
         if np_array.dtype != np.uint8:
-            # Safely convert to 8-bit without requiring scikit-image
-            try:
-                if SKIMAGE_AVAILABLE:
-                    from skimage.util import img_as_ubyte as _img_as_ubyte
-                    np_array = _img_as_ubyte(np_array)
-                else:
-                    if 'float' in str(np_array.dtype):
-                        np_array = (np.clip(np_array, 0.0, 1.0) * 255.0).astype(np.uint8)
-                    else:
-                        np_array = np.clip(np_array, 0, 255).astype(np.uint8)
-            except Exception:
-                if 'float' in str(np_array.dtype):
-                    np_array = (np.clip(np_array, 0.0, 1.0) * 255.0).astype(np.uint8)
-                else:
-                    np_array = np.clip(np_array, 0, 255).astype(np.uint8)
+            if 'float' in str(np_array.dtype):
+                np_array = (np.clip(np_array, 0.0, 1.0) * 255.0).astype(np.uint8)
+            else:
+                np_array = np.clip(np_array, 0, 255).astype(np.uint8)
         return Image.fromarray(np_array)
     
     @staticmethod
@@ -219,24 +179,6 @@ class LightweightCV:
         return edges
     
     @staticmethod
-    def find_edges_skimage(image, sigma=1.0, low_threshold=0.1, high_threshold=0.2):
-        """Edge detection using scikit-image (if available)"""
-        if not SKIMAGE_AVAILABLE:
-            return LightweightCV.find_edges_pil(image)
-        
-        if isinstance(image, Image.Image):
-            image = LightweightCV.pil_to_numpy(image)
-        
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            image = color.rgb2gray(image)
-        
-        # Apply Canny edge detection
-        edges = canny(image, sigma=sigma, low_threshold=low_threshold, high_threshold=high_threshold)
-        
-        return (edges * 255).astype(np.uint8)
-    
-    @staticmethod
     def color_mask_pil(image, color_ranges):
         """Create color mask using PIL (much lighter than OpenCV)"""
         if isinstance(image, np.ndarray):
@@ -267,382 +209,97 @@ class LightweightCV:
         else:
             mask_array = mask_image
         
-        # Simple contour detection using connected components
-        if SKIMAGE_AVAILABLE:
-            # Use scikit-image for better contour detection
-            labeled = measure.label(mask_array > 128)
-            regions = measure.regionprops(labeled)
-            
-            contours = []
-            for region in regions:
-                if region.area >= min_area:
-                    # Get bounding box
-                    minr, minc, maxr, maxc = region.bbox
-                    contours.append({
-                        'bbox': (minc, minr, maxc - minc, maxr - minr),
-                        'area': region.area,
-                        'centroid': region.centroid
-                    })
-            
-            return contours
-        else:
-            # Fallback: create a single bounding box over non-zero area
-            try:
-                pil_mask = mask_image if isinstance(mask_image, Image.Image) else Image.fromarray(mask_array)
-                bbox = pil_mask.getbbox()
-                if not bbox:
-                    return []
-                x0, y0, x1, y1 = bbox
-                w, h = max(0, x1 - x0), max(0, y1 - y0)
-                area = w * h
-                if area < min_area:
-                    return []
-                return [{
-                    'bbox': (x0, y0, w, h),
-                    'area': area,
-                    'centroid': (y0 + h / 2.0, x0 + w / 2.0)
-                }]
-            except Exception:
+        # Create a single bounding box over non-zero area (fast, low memory)
+        try:
+            pil_mask = mask_image if isinstance(mask_image, Image.Image) else Image.fromarray(mask_array)
+            bbox = pil_mask.getbbox()
+            if not bbox:
                 return []
+            x0, y0, x1, y1 = bbox
+            w, h = max(0, x1 - x0), max(0, y1 - y0)
+            area = w * h
+            if area < min_area:
+                return []
+            return [{
+                'bbox': (x0, y0, w, h),
+                'area': area,
+                'centroid': (y0 + h / 2.0, x0 + w / 2.0)
+            }]
+        except Exception:
+            return []
     
     @staticmethod
     def morphological_operations(image, operation='close', kernel_size=5):
-        """Morphological operations using scikit-image or PIL"""
-        if not SKIMAGE_AVAILABLE:
-            # Simple dilation/erosion using PIL
-            if isinstance(image, np.ndarray):
-                image = LightweightCV.numpy_to_pil(image)
-            
-            if operation == 'close':
-                # Dilation followed by erosion
-                for _ in range(kernel_size // 2):
-                    image = image.filter(ImageFilter.MaxFilter(3))
-                for _ in range(kernel_size // 2):
-                    image = image.filter(ImageFilter.MinFilter(3))
-            
-            return image
-        
-        # Use scikit-image for better morphological operations
-        if isinstance(image, Image.Image):
-            image = LightweightCV.pil_to_numpy(image)
-        
-        kernel = morphology.disk(kernel_size // 2)
+        """Morphological operations using simple PIL filters"""
+        if isinstance(image, np.ndarray):
+            image = LightweightCV.numpy_to_pil(image)
         
         if operation == 'close':
-            result = morphology.closing(image > 128, kernel)
-        elif operation == 'open':
-            result = morphology.opening(image > 128, kernel)
-        else:
-            result = image
+            for _ in range(max(1, kernel_size // 2)):
+                image = image.filter(ImageFilter.MaxFilter(3))
+            for _ in range(max(1, kernel_size // 2)):
+                image = image.filter(ImageFilter.MinFilter(3))
         
-        return (result * 255).astype(np.uint8)
+        return image
 
-class TFLiteFoodDetector:
-    """TensorFlow Lite-based food detection and classification"""
+class RemoteInferenceClient:
+    """Remote inference via HTTP API to keep Pi Zero W lightweight"""
     
-    def __init__(self, model_path=None):
-        self.interpreter = None
-        self.input_details = None
-        self.output_details = None
-        self.input_shape = None
-        self.food_labels = []
-        self.model_loaded = False
-        
-        # Default model paths
-        self.default_models = {
-            'food_classification': 'models/food_classifier.tflite',
-            'food_detection': 'models/food_detector.tflite',
-            'mobilenet_food': 'models/mobilenet_food_v2.tflite'
-        }
-        
-        # Food categories with calorie estimates (per 100g)
-        self.food_categories = {
-            'fruits': {
-                'apple': 52, 'banana': 89, 'orange': 47, 'grapes': 62, 'strawberry': 32,
-                'pineapple': 50, 'mango': 60, 'watermelon': 30, 'peach': 39, 'pear': 57
-            },
-            'vegetables': {
-                'carrot': 41, 'broccoli': 34, 'spinach': 23, 'tomato': 18, 'cucumber': 16,
-                'lettuce': 15, 'onion': 40, 'potato': 77, 'bell_pepper': 31, 'corn': 86
-            },
-            'grains': {
-                'rice': 130, 'bread': 265, 'pasta': 131, 'oats': 389, 'quinoa': 120,
-                'wheat': 327, 'barley': 354, 'noodles': 138
-            },
-            'proteins': {
-                'chicken': 165, 'beef': 250, 'fish': 206, 'eggs': 155, 'tofu': 76,
-                'beans': 127, 'lentils': 116, 'nuts': 607, 'cheese': 402
-            },
-            'dairy': {
-                'milk': 42, 'yogurt': 59, 'cheese': 402, 'butter': 717, 'cream': 345
-            }
-        }
-        
-        if TFLITE_AVAILABLE:
-            self.load_model(model_path)
+    def __init__(self, url: str = "", timeout: float = 8.0, max_upload_kb: int = 512):
+        self.url = url or ""
+        self.timeout = float(timeout or 8.0)
+        self.max_upload_kb = int(max_upload_kb or 512)
     
-    def load_model(self, model_path=None):
-        """Load TensorFlow Lite model for food detection"""
+    def encode_image_jpeg_base64(self, image: Image.Image, max_side: int = 512) -> str:
+        """Resize and JPEG-encode image to stay within max_upload_kb"""
         try:
-            # Try to load specified model or default models
-            models_to_try = []
-
-            # Support KaggleHub model path: "kagglehub:<model_id>"
-            if model_path and isinstance(model_path, str) and model_path.startswith("kagglehub"):
-                try:
-                    parts = model_path.split(":", 1)
-                    kh_id = parts[1] if len(parts) > 1 else "google/aiy/tfLite/vision-classifier-food-v1"
-                    import importlib
-                    kagglehub = importlib.import_module("kagglehub")
-                    download_dir = kagglehub.model_download(kh_id)
-                    # Find first .tflite file in download dir
-                    chosen = None
-                    for root, _, files in os.walk(download_dir):
-                        for f in files:
-                            if f.lower().endswith(".tflite"):
-                                chosen = os.path.join(root, f)
-                                break
-                        if chosen:
-                            break
-                    if chosen and os.path.exists(chosen):
-                        os.makedirs('models', exist_ok=True)
-                        dest_name = os.path.basename(chosen)
-                        dest_path = os.path.join('models', dest_name)
-                        try:
-                            if chosen != dest_path:
-                                import shutil
-                                shutil.copy2(chosen, dest_path)
-                            models_to_try.append(dest_path)
-                            logger.info(f"Using KaggleHub model: {dest_path}")
-                        except Exception:
-                            models_to_try.append(chosen)
-                            logger.info(f"Using KaggleHub model in-place: {chosen}")
-                    else:
-                        logger.warning("KaggleHub download succeeded but no .tflite file found")
-                except Exception as e:
-                    logger.warning(f"KaggleHub model resolution failed: {e}")
-
-            if model_path and os.path.exists(model_path):
-                models_to_try.append(model_path)
-            
-            # Add default models
-            for model_name, path in self.default_models.items():
-                if os.path.exists(path):
-                    models_to_try.append(path)
-            
-            if not models_to_try:
-                logger.warning("No TFLite models found. Creating directory structure...")
-                os.makedirs('models', exist_ok=True)
-                self._download_default_models()
-                return
-            
-            # Load the first available model
-            model_path = models_to_try[0]
-            logger.info(f"Loading TFLite model: {model_path}")
-            
-            # Load TFLite model and allocate tensors
-            if TFLITE_RUNTIME_ONLY:
-                self.interpreter = tflite.Interpreter(model_path=model_path)
-            else:
-                self.interpreter = tf.lite.Interpreter(model_path=model_path)
-            self.interpreter.allocate_tensors()
-            
-            # Get input and output tensors
-            self.input_details = self.interpreter.get_input_details()
-            self.output_details = self.interpreter.get_output_details()
-            
-            # Get input shape
-            self.input_shape = self.input_details[0]['shape']
-            logger.info(f"Model input shape: {self.input_shape}")
-            
-            # Load food labels if available
-            self._load_food_labels(model_path)
-            
-            self.model_loaded = True
-            logger.info("TFLite food detection model loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to load TFLite model: {e}")
-            self.model_loaded = False
-    
-    def _load_food_labels(self, model_path):
-        """Load food labels for the model"""
-        try:
-            # Try to load labels file
-            labels_path = model_path.replace('.tflite', '_labels.txt')
-            if os.path.exists(labels_path):
-                with open(labels_path, 'r') as f:
-                    self.food_labels = [line.strip() for line in f.readlines()]
-                logger.info(f"Loaded {len(self.food_labels)} food labels")
-            else:
-                # Use default food categories
-                self.food_labels = []
-                for category, foods in self.food_categories.items():
-                    self.food_labels.extend(foods.keys())
-                logger.info(f"Using default food labels: {len(self.food_labels)} items")
-                
-        except Exception as e:
-            logger.error(f"Error loading food labels: {e}")
-            self.food_labels = list(self.food_categories.keys())
-    
-    def _download_default_models(self):
-        """Download default food detection models"""
-        logger.info("Setting up default food detection models...")
-        
-        # Create a simple food classification model info file
-        model_info = {
-            "models_needed": [
-                {
-                    "name": "MobileNet Food Classifier",
-                    "url": "https://tfhub.dev/google/lite-model/aiy/vision/classifier/food_V1/1",
-                    "description": "Pre-trained food classification model"
-                }
-            ],
-            "setup_instructions": [
-                "1. Download pre-trained food models from TensorFlow Hub",
-                "2. Place .tflite files in the 'models' directory",
-                "3. Ensure corresponding _labels.txt files are present",
-                "4. Restart the application"
-            ]
-        }
-        
-        with open('models/README.json', 'w') as f:
-            json.dump(model_info, f, indent=2)
-        
-        logger.info("Created models directory and setup instructions")
-    
-    def preprocess_image(self, image):
-        """Preprocess image for TFLite model input"""
-        try:
-            if not self.model_loaded:
-                return None
-            
-            # Ensure we have a PIL Image
-            if isinstance(image, np.ndarray):
+            if not isinstance(image, Image.Image):
                 image = LightweightCV.numpy_to_pil(image)
             
-            # Get target size from model input shape
-            if len(self.input_shape) == 4:  # Batch, Height, Width, Channels
-                target_height = self.input_shape[1]
-                target_width = self.input_shape[2]
-            else:
-                target_height, target_width = 224, 224  # Default size
+            img = image.copy()
+            img.thumbnail((max_side, max_side), resample=RESAMPLE_LANCZOS)
             
-            # Resize image
-            image = image.resize((target_width, target_height), RESAMPLE_LANCZOS)
+            quality = 85
+            for _ in range(5):
+                buf = BytesIO()
+                img.save(buf, format="JPEG", quality=quality, optimize=True)
+                data = buf.getvalue()
+                kb = len(data) // 1024
+                if kb <= self.max_upload_kb or quality <= 50:
+                    return "data:image/jpeg;base64," + base64.b64encode(data).decode()
+                quality -= 7
             
-            # Convert to RGB if needed
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Convert to numpy array and normalize
-            image_array = np.array(image, dtype=np.float32)
-            
-            # Normalize to [0, 1] or [-1, 1] depending on model
-            image_array = image_array / 255.0
-            
-            # Add batch dimension
-            image_array = np.expand_dims(image_array, axis=0)
-            
-            return image_array
-            
-        except Exception as e:
-            logger.error(f"Error preprocessing image for TFLite: {e}")
-            return None
+            return "data:image/jpeg;base64," + base64.b64encode(data).decode()
+        except Exception:
+            return ""
     
-    def detect_food(self, image):
-        """Detect and classify food using TFLite model"""
+    def analyze(self, image: Image.Image, detected_objects: List[Dict]) -> Dict:
+        """Call remote inference endpoint and return analysis JSON"""
+        if not self.url:
+            return {"foods_detected": [], "analysis_notes": "Remote inference disabled"}
+        
         try:
-            if not self.model_loaded:
-                return []
+            img_b64 = self.encode_image_jpeg_base64(image)
+            if not img_b64:
+                return {"foods_detected": [], "analysis_notes": "Image encode failed"}
             
-            # Preprocess image
-            input_data = self.preprocess_image(image)
-            if input_data is None:
-                return []
+            hints = []
+            for obj in (detected_objects or [])[:3]:
+                hints.append({
+                    "area": int(obj.get("area", 0)),
+                    "method": obj.get("detection_method", "cv")
+                })
             
-            # Set input tensor
-            self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
-            
-            # Run inference
-            self.interpreter.invoke()
-            
-            # Get output
-            output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
-            
-            # Process results
-            results = self._process_detection_results(output_data)
-            
-            return results
-            
+            payload = {"image": img_b64, "hints": hints}
+            resp = requests.post(self.url, json=payload, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                return {"foods_detected": [], "analysis_notes": "Invalid response"}
+            data.setdefault("foods_detected", [])
+            return data
         except Exception as e:
-            logger.error(f"Error in TFLite food detection: {e}")
-            return []
-    
-    def _process_detection_results(self, output_data):
-        """Process TFLite model output into food detection results"""
-        try:
-            results = []
-            
-            # Handle different output formats
-            if len(output_data.shape) == 2:  # Classification output
-                predictions = output_data[0]
-                
-                # Get top predictions
-                top_indices = np.argsort(predictions)[-5:][::-1]  # Top 5
-                
-                for idx in top_indices:
-                    confidence = float(predictions[idx])
-                    
-                    if confidence > 0.1:  # Minimum confidence threshold
-                        # Get food name
-                        if idx < len(self.food_labels):
-                            food_name = self.food_labels[idx]
-                        else:
-                            food_name = f"food_class_{idx}"
-                        
-                        # Estimate calories
-                        calories = self._estimate_calories(food_name, confidence)
-                        
-                        results.append({
-                            'name': food_name,
-                            'confidence': confidence,
-                            'calories_per_100g': calories,
-                            'detection_method': 'tflite_classification'
-                        })
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error processing TFLite results: {e}")
-            return []
-    
-    def _estimate_calories(self, food_name, confidence):
-        """Estimate calories for detected food"""
-        try:
-            food_name_lower = food_name.lower()
-            
-            # Search in food categories
-            for category, foods in self.food_categories.items():
-                for food, calories in foods.items():
-                    if food in food_name_lower or food_name_lower in food:
-                        return calories
-            
-            # Default calorie estimates based on food type keywords
-            if any(keyword in food_name_lower for keyword in ['fruit', 'apple', 'banana', 'orange']):
-                return 50  # Average fruit calories
-            elif any(keyword in food_name_lower for keyword in ['vegetable', 'carrot', 'broccoli']):
-                return 35  # Average vegetable calories
-            elif any(keyword in food_name_lower for keyword in ['meat', 'chicken', 'beef']):
-                return 200  # Average meat calories
-            elif any(keyword in food_name_lower for keyword in ['bread', 'rice', 'pasta']):
-                return 150  # Average carb calories
-            else:
-                return 100  # Default estimate
-                
-        except Exception as e:
-            logger.error(f"Error estimating calories: {e}")
-            return 100
+            return {"foods_detected": [], "analysis_notes": f"Remote inference error: {e}"}
 
 class OLEDDisplay:
     """Handles transparent OLED display for showing detection results"""
@@ -692,67 +349,51 @@ class OLEDDisplay:
             self.display = None
     
     def create_food_display(self, foods_data: Dict, food_detected: bool = False, llm_processing: bool = False) -> Image.Image:
-        """Create display image for food detection results"""
+        """Create display image showing only food name and calories."""
         img = Image.new('1', (self.width, self.height), 0)  # 1-bit image for OLED
         draw = ImageDraw.Draw(img)
         
-        # Show different states based on detection status
-        if not food_detected:
-            # Show "Scanning" when no food detected
-            draw.text((25, 20), "Scanning", font=self.font, fill=1)
-            draw.text((15, 35), "for Food...", font=self.small_font, fill=1)
+        # Only render when we have at least one food item; otherwise keep screen blank
+        try:
+            foods = (foods_data or {}).get("foods_detected", [])
+            if not foods:
+                return img
+            
+            first = foods[0]
+            name = str(first.get("name", "")).strip()
+            cal_val = first.get("calories")
+            # Fallback to calories_per_100g if provided by some endpoints
+            if cal_val is None:
+                cal_val = first.get("calories_per_100g", 0)
+            calories = int(cal_val) if isinstance(cal_val, (int, float, str)) and str(cal_val).isdigit() else 0
+            
+            # Format strings
+            name = name[:16] if name else "Food"
+            calories_text = f"{calories} kcal"
+            
+            # Center text horizontally
+            try:
+                name_w, name_h = draw.textsize(name, font=self.font)
+                cal_w, cal_h = draw.textsize(calories_text, font=self.small_font)
+            except Exception:
+                # Fallback sizes if PIL lacks textsize
+                name_w, name_h = (len(name) * 6, 12)
+                cal_w, cal_h = (len(calories_text) * 6, 10)
+            
+            name_x = max(0, (self.width - name_w) // 2)
+            cal_x = max(0, (self.width - cal_w) // 2)
+            
+            # Vertical positioning
+            name_y = 14
+            cal_y = name_y + name_h + 8
+            
+            draw.text((name_x, name_y), name, font=self.font, fill=1)
+            draw.text((cal_x, cal_y), calories_text, font=self.small_font, fill=1)
+            
             return img
-        
-        if llm_processing:
-            # Show "Analyzing" when LLM is processing
-            draw.text((15, 15), "Analyzing", font=self.font, fill=1)
-            draw.text((25, 30), "Food...", font=self.small_font, fill=1)
-            # Add a simple progress indicator
-            for i in range(3):
-                x = 30 + i * 20
-                draw.ellipse([(x, 45), (x + 5, 50)], fill=1)
+        except Exception as e:
+            logger.debug(f"OLED render fallback: {e}")
             return img
-        
-        if not foods_data or "foods_detected" not in foods_data:
-            # Show "Processing" message
-            draw.text((20, 20), "Processing", font=self.font, fill=1)
-            draw.text((25, 35), "Food...", font=self.small_font, fill=1)
-            return img
-        
-        foods = foods_data["foods_detected"]
-        if not foods:
-            if "message" in foods_data:
-                draw.text((10, 20), "No Food", font=self.font, fill=1)
-                draw.text((10, 35), "Detected", font=self.font, fill=1)
-            else:
-                draw.text((20, 20), "Processing", font=self.font, fill=1)
-                draw.text((25, 35), "Food...", font=self.small_font, fill=1)
-            return img
-        
-        y_pos = 4
-        
-        # Show first food item (most confident)
-        food = foods[0]
-        name = str(food.get("name", "Food"))[:14]  # Truncate long names to fit
-        calories = int(food.get("calories", 0))
-        
-        # Determine harm level from calories (simple heuristic)
-        # LOW: <=150 kcal, MED: 151-300 kcal, HIGH: >300 kcal
-        if calories <= 150:
-            harm = "LOW"
-        elif calories <= 300:
-            harm = "MED"
-        else:
-            harm = "HIGH"
-        
-        # Vertical layout: Name, Calories, Harm level
-        draw.text((4, y_pos), name, font=self.font, fill=1)
-        y_pos += 18
-        draw.text((4, y_pos), f"Cal: {calories} kcal", font=self.small_font, fill=1)
-        y_pos += 12
-        draw.text((4, y_pos), f"Harm: {harm}", font=self.small_font, fill=1)
-        
-        return img
     
     def show_system_info(self, cpu_usage: float, memory_usage: float, fps: float):
         """Display system performance information"""
@@ -864,10 +505,15 @@ class FoodDetector:
         # Initialize OLED display
         self.oled_display = OLEDDisplay()
         
-        # Initialize TensorFlow Lite food detector
-        tflite_cfg = self.config.get("tflite", {}) if isinstance(self.config.get("tflite", {}), dict) else {}
-        model_path_cfg = tflite_cfg.get("model_path")
-        self.tflite_detector = TFLiteFoodDetector(model_path=model_path_cfg) if TFLITE_AVAILABLE else None
+        # Remote inference client (optional)
+        self.remote_client = RemoteInferenceClient(
+            url=self.config.get("remote_inference_url", ""),
+            timeout=self.config.get("remote_timeout", 8.0),
+            max_upload_kb=self.config.get("max_upload_size_kb", 512)
+        )
+        
+        # No on-device ML on Pi Zero W
+        self.tflite_detector = None
         
         # Performance optimization flags
         self.low_quality_mode = False
@@ -879,14 +525,6 @@ class FoodDetector:
         self.last_food_detection_time = 0
         self.food_detection_cooldown = 1.0  # Minimum time between food detections
         self.llm_processing = False
-        self.llm_queue = queue.Queue(maxsize=3)  # Queue for LLM processing
-        
-        # Start LLM processing thread
-        self.llm_thread = threading.Thread(target=self._llm_processing_worker, daemon=True)
-        self.llm_thread.start()
-        
-        # Initialize Groq client
-        self.init_groq_client()
         
         # Initialize camera (Pi Camera preferred)
         self.init_camera()
@@ -897,13 +535,14 @@ class FoodDetector:
     def load_config(self, config_path: str) -> Dict:
         """Load configuration from JSON file"""
         default_config = {
-            "groq_api_key": os.getenv("GROQ_API_KEY", ""),
+            "ml_enabled": False,
+            "remote_inference_url": os.getenv("REMOTE_INFERENCE_URL", ""),
+            "remote_timeout": 8.0,
+            "max_upload_size_kb": 512,
             "camera_index": 0,
             "camera_width": 320,  # Reduced for Pi Zero W
             "camera_height": 240,  # Reduced for Pi Zero W
             "detection_confidence": 0.5,
-            # Use a Groq vision-capable model by default
-            "calorie_estimation_model": "llama-3.2-11b-vision-preview",
             "detection_interval": 3.0,  # Increased interval
             "save_images": False,  # Disabled by default to save storage
             "output_dir": "detections",
@@ -931,32 +570,12 @@ class FoodDetector:
                 with open(config_path, 'r') as f:
                     user_config = json.load(f)
                 default_config.update(user_config)
-                # Environment variable should take precedence if provided
-                env_key = os.getenv("GROQ_API_KEY")
-                if env_key:
-                    default_config["groq_api_key"] = env_key
         except Exception as e:
             logger.warning(f"Could not load config file: {e}. Using defaults.")
             
         return default_config
     
-    def init_groq_client(self):
-        """Initialize Groq client for LLM integration"""
-        try:
-            # Prefer env var if present
-            env_key = os.getenv("GROQ_API_KEY", "")
-            if env_key:
-                self.config["groq_api_key"] = env_key
-            if not self.config["groq_api_key"]:
-                logger.warning("Groq API key not set; continuing without LLM integration.")
-                self.groq_client = None
-                return
-            
-            self.groq_client = Groq(api_key=self.config["groq_api_key"])
-            logger.info("Groq client initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize Groq client: {e}")
-            self.groq_client = None
+	# Groq client initialization removed; use remote HTTP if configured
     
     def init_camera(self):
         """Initialize camera for Raspberry Pi (prefer Pi Camera module)"""
@@ -1070,56 +689,7 @@ class FoodDetector:
             logger.error(f"Error capturing frame: {e}")
             return False, None
     
-    def _llm_processing_worker(self):
-        """Background worker for LLM processing"""
-        while True:
-            try:
-                # Get task from queue (blocks until available)
-                task = self.llm_queue.get(timeout=1.0)
-                
-                if task is None:  # Shutdown signal
-                    break
-                
-                frame, detected_objects, timestamp = task
-                
-                # Set processing flag
-                self.llm_processing = True
-                
-                # Analyze with Groq LLM
-                groq_result = self.analyze_food_with_groq(frame, detected_objects)
-                groq_result["detection_timestamp"] = timestamp
-                
-                # Update last detection result
-                self.last_detection_result = groq_result
-                
-                # Save results if enabled
-                if self.config["save_images"]:
-                    self.save_detection_result(frame, {
-                        "detected_objects": len(detected_objects),
-                        "groq_analysis": groq_result
-                    })
-                
-                # Add to history
-                self.results_history.append({
-                    "timestamp": timestamp,
-                    "detected_objects": len(detected_objects),
-                    "groq_result": groq_result
-                })
-                
-                # Print results
-                self.print_results(groq_result)
-                
-                # Clear processing flag
-                self.llm_processing = False
-                
-                # Mark task as done
-                self.llm_queue.task_done()
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"Error in LLM processing worker: {e}")
-                self.llm_processing = False
+	# LLM worker removed; remote inference is handled inline
     
     def is_food_detected(self, detected_objects: List[Dict]) -> bool:
         """Enhanced food detection logic to determine if actual food is present"""
@@ -1190,7 +760,7 @@ class FoodDetector:
             return frame
     
     def detect_food_objects(self, frame) -> List[Dict]:
-        """Detect potential food objects using TFLite or lightweight computer vision"""
+        """Detect potential food objects using lightweight computer vision"""
         detected_objects = []
         
         try:
@@ -1198,43 +768,7 @@ class FoodDetector:
             if isinstance(frame, np.ndarray):
                 frame = LightweightCV.numpy_to_pil(frame)
             
-            # Try TensorFlow Lite detection first (more accurate)
-            if self.tflite_detector and self.tflite_detector.model_loaded:
-                tflite_results = self.tflite_detector.detect_food(frame)
-
-                # Filter by confidence threshold and limit to max detections
-                thr = float(self.config.get("tflite", {}).get("confidence_threshold", 0.35))
-                max_det = int(self.config.get("tflite", {}).get("max_detections", 3))
-                tflite_results = [r for r in (tflite_results or []) if r.get('confidence', 0.0) >= thr]
-                tflite_results.sort(key=lambda r: r.get('confidence', 0.0), reverse=True)
-                tflite_results = tflite_results[:max_det]
-
-                if tflite_results:
-                    logger.debug(f"TFLite kept {len(tflite_results)} candidates after thresholding")
-                    
-                    # Convert TFLite results to our format
-                    for i, result in enumerate(tflite_results):
-                        # Create a bounding box (since TFLite classification doesn't provide one)
-                        # Use the whole image or estimate based on center
-                        width, height = frame.size
-                        bbox_size = min(width, height) // 2
-                        x = (width - bbox_size) // 2
-                        y = (height - bbox_size) // 2
-                        
-                        detected_objects.append({
-                            'bbox': (x, y, bbox_size, bbox_size),
-                            'area': bbox_size * bbox_size,
-                            'aspect_ratio': 1.0,
-                            'roi': frame.crop((x, y, x + bbox_size, y + bbox_size)),
-                            'confidence': result.get('confidence', 0.0),
-                            'food_name': result.get('name'),
-                            'calories_per_100g': result.get('calories_per_100g'),
-                            'detection_method': 'tflite'
-                        })
-                    
-                    return detected_objects[:max_det]
-            
-            # Fallback to traditional computer vision if TFLite not available or no results
+            # Traditional computer vision (color mask + simple bbox heuristic)
             logger.debug("Using traditional CV for food detection")
             
             # Create color mask using lightweight method
@@ -1280,129 +814,7 @@ class FoodDetector:
             logger.error(f"Error in food object detection: {e}")
             return []
     
-    def encode_image_for_groq(self, image) -> str:
-        """Encode image to base64 for Groq API"""
-        try:
-            # Ensure we have a PIL Image
-            if isinstance(image, np.ndarray):
-                pil_image = LightweightCV.numpy_to_pil(image)
-            else:
-                pil_image = image
-            
-            # Resize for efficiency (Groq has size limits) - PIL is much faster for this
-            pil_image.thumbnail((512, 512), resample=RESAMPLE_LANCZOS)
-            
-            # Convert to base64
-            buffer = BytesIO()
-            pil_image.save(buffer, format="JPEG", quality=85)
-            image_base64 = base64.b64encode(buffer.getvalue()).decode()
-            
-            return f"data:image/jpeg;base64,{image_base64}"
-            
-        except Exception as e:
-            logger.error(f"Error encoding image: {e}")
-            return ""
-    
-    def analyze_food_with_groq(self, image: np.ndarray, detected_objects: List[Dict]) -> Dict:
-        """Use Groq LLM to identify food and estimate calories"""
-        try:
-            if not self.groq_client:
-                return {"error": "Groq client not initialized"}
-            
-            # Encode image for API
-            image_data = self.encode_image_for_groq(image)
-            if not image_data:
-                return {"error": "Failed to encode image"}
-            
-            # Candidate hints from on-device model
-            candidate_hints = []
-            for obj in (detected_objects or []):
-                if obj.get('detection_method') == 'tflite':
-                    name = obj.get('food_name')
-                    if name and name not in candidate_hints:
-                        candidate_hints.append(name)
-            hint_text = ""
-            if candidate_hints:
-                hint_text = f"Candidate foods (from on-device model): {', '.join(candidate_hints[:3])}. Prefer these if reasonable.\n"
-
-            # Create prompt for food identification and calorie estimation (request strict JSON only)
-            prompt = f"""
-            {hint_text}
-            Analyze this image and identify any food items present. For each food item you identify:
-            
-            1. Name of the food item
-            2. Estimated portion size (small, medium, large, or specific measurements if possible)
-            3. Estimated calories for that portion
-            4. Confidence level (1-10) in your identification
-            5. Brief description of what you see
-            
-            I detected {len(detected_objects)} potential food objects in the image using computer vision.
-            
-            Return STRICT JSON ONLY with this schema (no extra commentary):
-            {{
-                "foods_detected": [
-                    {{
-                        "name": "food_name",
-                        "portion_size": "estimated_size",
-                        "calories": estimated_calories_number,
-                        "confidence": confidence_score,
-                        "description": "what_you_see"
-                    }}
-                ],
-                "total_calories": total_estimated_calories,
-                "analysis_notes": "any_additional_observations"
-            }}
-            
-            If no food is clearly visible, return an empty foods_detected array.
-            """
-            
-            # Make API call to Groq
-            response = self.groq_client.chat.completions.create(
-                model=self.config["calorie_estimation_model"],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": image_data}}
-                        ]
-                    }
-                ],
-                max_tokens=1000,
-                temperature=0.3
-            )
-            
-            # Parse response with robust JSON extraction
-            response_text = response.choices[0].message.content
-            
-            try:
-                result = json.loads(response_text)
-                result["timestamp"] = datetime.now().isoformat()
-                result["detection_method"] = "groq_llm"
-                return result
-            except json.JSONDecodeError:
-                import re
-                match = re.search(r"\{[\s\S]*\}$", response_text.strip())
-                if match:
-                    try:
-                        result = json.loads(match.group(0))
-                        result["timestamp"] = datetime.now().isoformat()
-                        result["detection_method"] = "groq_llm"
-                        return result
-                    except Exception:
-                        pass
-                return {
-                    "error": "Failed to parse JSON response",
-                    "raw_response": response_text,
-                    "timestamp": datetime.now().isoformat()
-                }
-                
-        except Exception as e:
-            logger.error(f"Error in Groq analysis: {e}")
-            return {
-                "error": str(e),
-                "timestamp": datetime.now().isoformat()
-            }
+	# Groq SDK removed; remote inference is handled by RemoteInferenceClient
     
     def save_detection_result(self, frame: np.ndarray, result: Dict):
         """Save detection result and image if configured"""
@@ -1492,9 +904,11 @@ class FoodDetector:
         logger.info("Starting optimized food detection loop...")
         
         try:
+            from hashlib import md5
             last_display_update = 0
             last_memory_cleanup = 0
             frame_count = 0
+            last_scene_sig = None
             
             while True:
                 current_time = time.time()
@@ -1549,19 +963,25 @@ class FoodDetector:
                         self.food_detected = True
                         self.last_food_detection_time = current_time
                         
-                        # Queue LLM analysis only when food is detected and scene changed (debounce)
-                        if not self.llm_processing and not self.llm_queue.full():
-                            try:
-                                # Create a simple scene signature from top ROI to avoid redundant calls
-                                top_roi = detected_objects[0]['roi'].resize((64, 64)).convert('L')
-                                from hashlib import md5
-                                sig = md5(top_roi.tobytes()).hexdigest()
-                                if getattr(self, '_last_scene_sig', None) != sig:
-                                    self._last_scene_sig = sig
-                                    self.llm_queue.put_nowait((frame, detected_objects, datetime.now().isoformat()))
-                                    logger.info("🤖 Queued for LLM analysis...")
-                            except queue.Full:
-                                logger.warning("LLM queue is full, skipping analysis")
+                        # Inline remote analysis on scene change (debounce)
+                        try:
+                            top_roi = detected_objects[0]['roi'].resize((64, 64)).convert('L')
+                            sig = md5(top_roi.tobytes()).hexdigest()
+                            if last_scene_sig != sig:
+                                last_scene_sig = sig
+                                self.llm_processing = True
+                                analysis = self.remote_client.analyze(frame, detected_objects)
+                                analysis["detection_timestamp"] = datetime.now().isoformat()
+                                self.last_detection_result = analysis
+                                self.results_history.append({
+                                    "timestamp": analysis.get("detection_timestamp"),
+                                    "detected_objects": len(detected_objects),
+                                    "result": analysis
+                                })
+                                self.print_results(analysis)
+                                self.llm_processing = False
+                        except Exception as e:
+                            logger.debug(f"Remote analysis skipped: {e}")
                     
                     # Update detection time for continuous food presence
                     self.last_food_detection_time = current_time
@@ -1578,18 +998,13 @@ class FoodDetector:
                 display_update_interval = self.config["oled_display"]["update_interval"]
                 if current_time - last_display_update >= display_update_interval:
                     
-                    if self.config["oled_display"]["show_system_info"] and frame_count % 20 == 0:
-                        # Show system info occasionally (less frequent)
-                        avg_cpu, avg_memory, avg_fps = self.performance_monitor.get_average_metrics()
-                        self.oled_display.show_system_info(avg_cpu, avg_memory, avg_fps)
-                    else:
-                        # Show food detection status and results
-                        display_img = self.oled_display.create_food_display(
-                            self.last_detection_result or {},
-                            food_detected=self.food_detected,
-                            llm_processing=self.llm_processing
-                        )
-                        self.oled_display.update_display(display_img)
+                    # Always show only food name and calories; blank if none
+                    display_img = self.oled_display.create_food_display(
+                        self.last_detection_result or {},
+                        food_detected=self.food_detected,
+                        llm_processing=self.llm_processing
+                    )
+                    self.oled_display.update_display(display_img)
                     
                     last_display_update = current_time
                 
@@ -1672,11 +1087,7 @@ class FoodDetector:
     def cleanup(self):
         """Clean up resources"""
         try:
-            # Shutdown LLM processing thread
-            if hasattr(self, 'llm_queue'):
-                self.llm_queue.put(None)  # Shutdown signal
-                if hasattr(self, 'llm_thread') and self.llm_thread.is_alive():
-                    self.llm_thread.join(timeout=2.0)
+            # No background threads to stop
             
             # Clean up camera resources
             if self.picamera2:
@@ -1696,12 +1107,14 @@ class FoodDetector:
 def create_default_config():
     """Create default configuration file"""
     config = {
-        "groq_api_key": "",
+        "ml_enabled": False,
+        "remote_inference_url": "",
+        "remote_timeout": 8.0,
+        "max_upload_size_kb": 512,
         "camera_index": 0,
         "camera_width": 320,
         "camera_height": 240,
         "detection_confidence": 0.5,
-        "calorie_estimation_model": "llama-3.2-11b-vision-preview",
         "detection_interval": 3.0,
         "save_images": False,
         "output_dir": "detections",
@@ -1721,13 +1134,6 @@ def create_default_config():
             "height": 64,
             "update_interval": 1.0,
             "show_system_info": True
-        },
-        "tflite": {
-            "enabled": True,
-            "model_path": "kagglehub:google/aiy/tfLite/vision-classifier-food-v1",
-            "confidence_threshold": 0.35,
-            "max_detections": 3,
-            "use_fallback_cv": True
         }
     }
     
@@ -1735,7 +1141,7 @@ def create_default_config():
         json.dump(config, f, indent=2)
     
     print("Created default config.json file")
-    print("Please edit config.json and add your Groq API key")
+    print("Optionally set remote_inference_url in config.json or .env (REMOTE_INFERENCE_URL)")
 
 def main():
     """Main function"""

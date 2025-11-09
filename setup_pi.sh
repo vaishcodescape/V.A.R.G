@@ -13,14 +13,21 @@ echo "🔧 Installing system dependencies (lightweight)..."
 sudo apt install -y \
     python3-pip \
     python3-venv \
+    python3-dev \
     python3-numpy \
     python3-pil \
+    python3-psutil \
+    python3-requests \
+    python3-dotenv \
     python3-picamera2 \
-    i2c-tools \
-    libatlas-base-dev \
+    python3-opencv \
     libjpeg-dev \
+    libatlas-base-dev \
+    zlib1g-dev \
     libpng-dev \
-    libtiff-dev
+    libtiff-dev \
+    i2c-tools \
+    fonts-dejavu-core
 
 # Enable camera interface
 echo "📷 Enabling camera interface..."
@@ -28,8 +35,18 @@ sudo raspi-config nonint do_camera 0
 
 # Create virtual environment
 echo "🐍 Creating Python virtual environment..."
-python3 -m venv varg_env
+# Share system packages (numpy/Pillow/etc.) with the venv to avoid slow pip builds
+python3 -m venv --system-site-packages varg_env
 source varg_env/bin/activate
+
+# Configure pip to use PiWheels and reduce build pressure on low-RAM devices
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_DEFAULT_TIMEOUT=60
+export PIP_NO_CACHE_DIR=1
+export PIP_INDEX_URL="https://www.piwheels.org/simple"
+export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
 
 # Upgrade pip
 pip install --upgrade pip setuptools wheel

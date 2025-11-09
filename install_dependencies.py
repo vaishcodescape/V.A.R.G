@@ -25,44 +25,38 @@ class DependencyManager:
         self.platform_info = platform.platform()
         self.missing_packages = []
         self.optional_packages = []
+        # Prefer PiWheels on Raspberry Pi for faster installs
+        os.environ.setdefault('PIP_DISABLE_PIP_VERSION_CHECK', '1')
+        os.environ.setdefault('PIP_DEFAULT_TIMEOUT', '60')
+        os.environ.setdefault('PIP_NO_CACHE_DIR', '1')
+        os.environ.setdefault('PIP_INDEX_URL', 'https://www.piwheels.org/simple')
+        os.environ.setdefault('PIP_EXTRA_INDEX_URL', 'https://pypi.org/simple')
         
-        # Core dependencies that must be available
+        # Core dependencies that must be available (Pi Zero W compatible)
         self.core_dependencies = {
-            'numpy': 'numpy>=1.21.0,<1.25.0',
-            'PIL': 'Pillow>=9.0.0,<11.0.0',
+            'numpy': 'numpy>=1.20.0,<1.26.0',
+            'PIL': 'Pillow>=8.0.0,<11.0.0',
             'psutil': 'psutil>=5.8.0,<6.0.0',
             'dotenv': 'python-dotenv>=0.19.0,<2.0.0',
-            'groq': 'groq>=0.4.0,<1.0.0',
-            'json': None,  # Built-in
-            'time': None,  # Built-in
-            'logging': None,  # Built-in
-            'datetime': None,  # Built-in
-            'os': None,  # Built-in
-            'threading': None,  # Built-in
-            'queue': None,  # Built-in
-            'gc': None,  # Built-in
-            'collections': None,  # Built-in
-            'base64': None,  # Built-in
-            'io': None,  # Built-in
+            'requests': 'requests>=2.25.0,<3.0.0',
+            'json': None,
+            'time': None,
+            'logging': None,
+            'datetime': None,
+            'os': None,
+            'gc': None,
+            'collections': None,
+            'base64': None,
+            'io': None,
         }
         
-        # Optional dependencies for enhanced functionality
+        # Optional dependencies (cv2 will be installed via apt, not pip)
         self.optional_dependencies = {
-            'skimage': 'scikit-image>=0.19.0,<0.22.0',
-            'tflite_runtime': 'tflite-runtime>=2.13.0,<2.15.0',
-            'tensorflow': 'tensorflow>=2.13.0,<2.15.0',
-            'cv2': 'opencv-python-headless>=4.5.0,<5.0.0',
-            'kagglehub': 'kagglehub>=0.2.0,<1.0.0',
+            'cv2': None,
         }
         
-        # Raspberry Pi specific dependencies
-        self.pi_dependencies = {
-            'picamera2': 'picamera2>=0.3.0',
-            'RPi.GPIO': 'RPi.GPIO>=0.7.0',
-            'board': 'adafruit-blinka>=8.0.0,<9.0.0',
-            'adafruit_displayio_ssd1306': 'adafruit-circuitpython-displayio-ssd1306>=1.5.0,<2.0.0',
-            'displayio': 'adafruit-circuitpython-displayio-ssd1306>=1.5.0,<2.0.0',
-        }
+        # Raspberry Pi specific dependencies (none required for minimal build)
+        self.pi_dependencies = {}
     
     def detect_raspberry_pi(self):
         """Detect if running on Raspberry Pi"""
@@ -70,7 +64,7 @@ class DependencyManager:
             with open('/proc/cpuinfo', 'r') as f:
                 cpuinfo = f.read()
             return 'BCM' in cpuinfo and 'ARM' in cpuinfo
-        except:
+        except OSError:
             return False
     
     def check_python_version(self):
@@ -85,17 +79,26 @@ class DependencyManager:
     def install_package(self, package_spec):
         """Install a package using pip"""
         try:
-            logger.info(f"Installing {package_spec}...")
-            result = subprocess.run([
-                sys.executable, '-m', 'pip', 'install', package_spec
-            ], capture_output=True, text=True, check=True)
+            logger.info(f"Installing {package_spec} (wheels-preferred)...")
+            base = [sys.executable, '-m', 'pip', 'install', '--prefer-binary', '--no-cache-dir', '--no-compile']
+            subprocess.run(base + ['--only-binary', ':all:', package_spec],
+                           capture_output=True, text=True, check=True)
             
             logger.info(f"Successfully installed {package_spec}")
             return True
             
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to install {package_spec}: {e.stderr}")
-            return False
+            logger.warning(f"Wheel install failed for {package_spec}: {e.stderr.strip()[:200]}")
+            # Retry without only-binary and without build isolation (last resort)
+            try:
+                logger.info(f"Retrying {package_spec} without build isolation...")
+                subprocess.run(base + ['--no-build-isolation', package_spec],
+                               capture_output=True, text=True, check=True)
+                logger.info(f"Successfully installed (no-build-isolation): {package_spec}")
+                return True
+            except subprocess.CalledProcessError as e2:
+                logger.error(f"Failed to install {package_spec} after retries: {e2.stderr.strip()[:200]}")
+                return False
     
     def check_import(self, module_name, package_spec=None):
         """Check if a module can be imported"""
@@ -119,24 +122,15 @@ class DependencyManager:
         
         system_packages = [
             'python3-dev',
-            'libopenblas-dev',
-            'liblapack-dev',
+            # Prefer system Python packages to avoid long builds on Pi Zero W
+            'python3-numpy',
+            'python3-pil',
+            'python3-psutil',
+            'python3-requests',
+            'python3-opencv',
+            # Minimal build tools and headers often needed by Pillow
             'libjpeg-dev',
-            'libpng-dev',
-            'libtiff-dev',
-            'libv4l-dev',
-            'libfontconfig1-dev',
-            'libcairo2-dev',
-            'libgdk-pixbuf-2.0-dev',
-            'libpango1.0-dev',
-            'libglib2.0-dev',
-            'libgtk-3-dev',
-            'libgstreamer1.0-dev',
-            'gfortran',
-            'libhdf5-dev',
-            'libhdf5-serial-dev',
-            'pkg-config',
-            'i2c-tools',
+            'zlib1g-dev',
         ]
         
         try:
@@ -328,7 +322,7 @@ sys.modules['RPi.GPIO'] = GPIO
         logger.info("Verifying installation...")
         
         critical_imports = [
-            'numpy', 'PIL', 'psutil', 'groq', 'json', 'time', 'logging'
+            'numpy', 'PIL', 'psutil', 'requests', 'json', 'time', 'logging'
         ]
         
         failed_imports = []
