@@ -59,7 +59,14 @@ except ImportError:
 # Try to import OLED display libraries
 try:
     import board
+    import busio
+    import digitalio
     import adafruit_displayio_ssd1306
+    try:
+        import adafruit_displayio_ssd1309 as ssd1309_driver  # optional, used if available
+        SSD1309_AVAILABLE = True
+    except Exception:
+        SSD1309_AVAILABLE = False
     import displayio
     OLED_AVAILABLE = True
 except ImportError:
@@ -350,23 +357,23 @@ class OLEDDisplay:
         self.show_message(["V.A.R.G", "Food Calorie Detector"])
     
     def init_display(self):
-        """Initialize the OLED display"""
+        """Initialize the OLED display over SPI (DIN/MOSI, CLK/SCLK, CS, DC, RST)."""
         try:
             displayio.release_displays()
-            
-            # Initialize I2C
-            i2c = board.I2C()
-            # Try common SSD1306 I2C addresses (0x3C then 0x3D)
-            try:
-                display_bus = displayio.I2CDisplay(i2c, device_address=0x3C)
-            except Exception:
-                display_bus = displayio.I2CDisplay(i2c, device_address=0x3D)
-            
-            # Initialize display
-            self.display = adafruit_displayio_ssd1306.SSD1306(
-                display_bus, width=self.width, height=self.height
-            )
-            
+            # SPI wiring defaults (change GPIOs here if wired differently)
+            spi = busio.SPI(board.SCLK, board.MOSI)  # no MISO for OLED
+            tft_cs = digitalio.DigitalInOut(getattr(board, "CE0"))
+            tft_dc = digitalio.DigitalInOut(getattr(board, "D25"))
+            tft_rst = digitalio.DigitalInOut(getattr(board, "D24"))
+            display_bus = displayio.FourWire(spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=8000000)
+            # Prefer SSD1309 if available (common on 1.3/1.5\" SPI monochrome panels), fallback to SSD1306.
+            if 'SSD1309_AVAILABLE' in globals() and SSD1309_AVAILABLE:
+                try:
+                    self.display = ssd1309_driver.SSD1309(display_bus, width=self.width, height=self.height)
+                except Exception as _e:
+                    self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
+            else:
+                self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
             # Load fonts
             try:
                 self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
@@ -374,11 +381,9 @@ class OLEDDisplay:
             except (OSError, IOError):
                 self.font = ImageFont.load_default()
                 self.small_font = ImageFont.load_default()
-            
-            logger.info("OLED display initialized successfully")
-            
+            logger.info("OLED display (SPI) initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize OLED display: {e}")
+            logger.error(f"Failed to initialize OLED display (SPI): {e}")
             self.display = None
     
     def create_food_display(self, foods_data: Dict, food_detected: bool = False, llm_processing: bool = False) -> Image.Image:
