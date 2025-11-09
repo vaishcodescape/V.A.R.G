@@ -383,10 +383,17 @@ class OLEDDisplay:
                 # Fallback to displayio SSD1306 over SPI
                 displayio.release_displays()
                 spi = busio.SPI(board.SCLK, board.MOSI)  # no MISO for OLED
-                tft_cs = digitalio.DigitalInOut(getattr(board, "CE0"))
+                # Allow CE0/CE1 selection via env var OLED_CS (default CE0)
+                cs_name = os.getenv("OLED_CS", "CE0")
+                try:
+                    cs_pin = getattr(board, cs_name)
+                except Exception:
+                    cs_pin = getattr(board, "CE0")
+                tft_cs = digitalio.DigitalInOut(cs_pin)
                 tft_dc = digitalio.DigitalInOut(getattr(board, "D25"))
                 tft_rst = digitalio.DigitalInOut(getattr(board, "D24"))
-                display_bus = displayio.FourWire(spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=4000000)
+                # Conservative baudrate for stability
+                display_bus = displayio.FourWire(spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=2000000)
                 if not DISPLAYIO_SSD1306_AVAILABLE:
                     raise RuntimeError("displayio SSD1306 driver not available and Waveshare driver not found")
                 self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
