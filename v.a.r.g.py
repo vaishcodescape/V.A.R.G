@@ -347,7 +347,7 @@ class OLEDDisplay:
     
     def show_startup(self):
         """Show startup splash to indicate process start."""
-        self.show_message(["V.A.R.G", "Food Calorie", "Detector"])
+        self.show_message(["V.A.R.G", "Food Calorie Detector"])
     
     def init_display(self):
         """Initialize the OLED display"""
@@ -540,6 +540,8 @@ class FoodDetector:
         # Show startup splash
         try:
             self.oled_display.show_startup()
+            # Brief pause so the splash is visible even if we fail early
+            time.sleep(1.5)
         except Exception:
             pass
         
@@ -658,6 +660,8 @@ class FoodDetector:
             try:
                 if self.oled_display and self.oled_display.display:
                     self.oled_display.show_message(["Camera not found", "Check cable &", "raspi-config"])
+                    # Give user a moment to read the message
+                    time.sleep(2)
             except Exception:
                 pass
             raise RuntimeError("No available camera. Enable Picamera2 or attach USB camera with OpenCV available.")
