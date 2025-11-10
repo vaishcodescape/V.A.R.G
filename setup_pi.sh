@@ -33,6 +33,8 @@ sudo apt install -y \
 # Enable camera interface
 echo "📷 Enabling camera interface..."
 sudo raspi-config nonint do_camera 0
+echo "🔌 Enabling SPI interface..."
+sudo raspi-config nonint do_spi 0
 
 # Create virtual environment
 echo "🐍 Creating Python virtual environment..."
@@ -108,6 +110,53 @@ fi
 
 # Make the main script executable
 chmod +x v.a.r.g.py
+
+# Seed a SPI-focused config.json if missing
+if [ ! -f "config.json" ]; then
+  echo "📝 Creating default SPI config.json..."
+  cat > config.json << 'EOF'
+{
+  "ml_enabled": false,
+  "remote_inference_url": "",
+  "remote_timeout": 8.0,
+  "max_upload_size_kb": 512,
+  "camera_index": 0,
+  "camera_width": 320,
+  "camera_height": 240,
+  "detection_confidence": 0.5,
+  "detection_interval": 3.0,
+  "save_images": false,
+  "output_dir": "detections",
+  "preprocessing": {
+    "blur_kernel": 3,
+    "brightness_adjustment": 1.1,
+    "contrast_adjustment": 1.05
+  },
+  "performance": {
+    "max_fps": 10,
+    "frame_skip": 2,
+    "low_quality_threshold": 75,
+    "memory_cleanup_interval": 30
+  },
+  "oled_display": {
+    "width": 128,
+    "height": 64,
+    "update_interval": 1.0,
+    "show_system_info": true,
+    "rotate": 0,
+    "invert": false,
+    "spi": {
+      "bus": 0,
+      "device": 0,
+      "baudrate": 8000000,
+      "dc_pin_bcm": 25,
+      "rst_pin_bcm": 24,
+      "driver": "ssd1309"
+    }
+  }
+}
+EOF
+fi
 
 # Create systemd service file for auto-start
 echo "🔧 Creating systemd service..."

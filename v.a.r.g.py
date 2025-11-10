@@ -278,7 +278,7 @@ class RemoteInferenceClient:
         self.timeout = float(timeout or 8.0)
         self.max_upload_kb = int(max_upload_kb or 512)
     
-    def encode_image_jpeg_base64(self, image: Image.Image, max_side: int = 512) -> str:
+    def encode_image_jpeg_base64(self, image: Image.Image, max_side: int = 320) -> str:
         """Resize and JPEG-encode image to stay within max_upload_kb"""
         try:
             if not isinstance(image, Image.Image):
@@ -287,15 +287,15 @@ class RemoteInferenceClient:
             img = image.copy()
             img.thumbnail((max_side, max_side), resample=RESAMPLE_LANCZOS)
             
-            quality = 85
-            for _ in range(5):
+            quality = 80
+            for _ in range(4):
                 buf = BytesIO()
                 img.save(buf, format="JPEG", quality=quality, optimize=True)
                 data = buf.getvalue()
                 kb = len(data) // 1024
-                if kb <= self.max_upload_kb or quality <= 50:
+                if kb <= self.max_upload_kb or quality <= 55:
                     return "data:image/jpeg;base64," + base64.b64encode(data).decode()
-                quality -= 7
+                quality -= 8
             
             return "data:image/jpeg;base64," + base64.b64encode(data).decode()
         except Exception:
@@ -343,6 +343,8 @@ class OLEDDisplay:
         self.small_font = None
         self.rotate = int(self.config.get("rotate", 0) or 0)
         self.invert = bool(self.config.get("invert", False))
+        # Track last frame hash to skip redundant SPI updates
+        self._last_frame_hash = None
         
         self.init_display()
     
@@ -556,6 +558,16 @@ class OLEDDisplay:
                 except Exception:
                     pass
 
+            # Skip update if frame is identical to last (saves SPI bandwidth/CPU)
+            try:
+                import hashlib as _hashlib
+                current_hash = _hashlib.md5(frame.tobytes()).hexdigest()
+                if self._last_frame_hash == current_hash:
+                    return
+                self._last_frame_hash = current_hash
+            except Exception:
+                pass
+
             if self.luma_device is not None:
                 # luma device rendering
                 try:
@@ -596,16 +608,37 @@ class PerformanceMonitor:
         self.memory_history = deque(maxlen=max_history)
         self.fps_history = deque(maxlen=max_history)
         self.last_frame_time = time.time()
+        # Reduce sampling overhead on Pi Zero W
+        self.last_metrics_time = 0.0
+        self.min_update_interval = 0.5  # seconds
+        self._last_cpu = 0.0
+        self._last_mem = 0.0
+        try:
+            # Prime psutil CPU to enable non-blocking subsequent calls
+            _ = psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
         
     def update_metrics(self):
         """Update performance metrics"""
-        # CPU usage
-        cpu_percent = psutil.cpu_percent(interval=0.1)
+        now = time.time()
+        # CPU and memory sampling throttled
+        if (now - self.last_metrics_time) >= self.min_update_interval:
+            try:
+                cpu_percent = psutil.cpu_percent(interval=None)
+                self._last_cpu = cpu_percent
+            except Exception:
+                cpu_percent = self._last_cpu
+            try:
+                memory = psutil.virtual_memory()
+                self._last_mem = memory.percent
+            except Exception:
+                pass
+            self.last_metrics_time = now
+        cpu_percent = self._last_cpu
+        memory_percent = self._last_mem
         self.cpu_history.append(cpu_percent)
-        
-        # Memory usage
-        memory = psutil.virtual_memory()
-        self.memory_history.append(memory.percent)
+        self.memory_history.append(memory_percent)
         
         # FPS calculation
         current_time = time.time()
@@ -613,7 +646,7 @@ class PerformanceMonitor:
         self.fps_history.append(fps)
         self.last_frame_time = current_time
         
-        return cpu_percent, memory.percent, fps
+        return cpu_percent, memory_percent, fps
     
     def get_average_metrics(self):
         """Get average performance metrics"""
@@ -719,7 +752,18 @@ class FoodDetector:
                 "width": 128,
                 "height": 64,
                 "update_interval": 1.0,  # Update display every second
-                "show_system_info": True
+                "show_system_info": True,
+                # SPI-centric defaults for Raspberry Pi (transparent OLEDs are commonly SSD1309/SSD1306 over SPI)
+                "rotate": 0,
+                "invert": False,
+                "spi": {
+                    "bus": 0,            # SPI bus (0 for /dev/spidev0.*)
+                    "device": 0,         # Chip select (0 => CE0, 1 => CE1)
+                    "baudrate": 8000000, # 8MHz (lower to 4000000 if unstable)
+                    "dc_pin_bcm": 25,    # Data/Command pin (BCM numbering)
+                    "rst_pin_bcm": 24,   # Reset pin (BCM numbering)
+                    "driver": "ssd1309"  # "ssd1309" (Waveshare 1.51") or "ssd1306"
+                }
             }
         }
         
@@ -1078,9 +1122,13 @@ class FoodDetector:
             frame_count = 0
             last_scene_sig = None
             last_camera_retry = 0
+            # Cap FPS per config
+            target_fps = max(1, int(self.config.get("performance", {}).get("max_fps", 10)))
+            frame_period = 1.0 / float(target_fps)
             
             while True:
-                current_time = time.time()
+                loop_start = time.time()
+                current_time = loop_start
                 
                 # Update performance metrics
                 cpu_usage, memory_usage, fps = self.performance_monitor.update_metrics()
@@ -1213,10 +1261,12 @@ class FoodDetector:
                         break
                 
                 # Adaptive delay based on performance
-                if self.low_quality_mode:
-                    time.sleep(0.2)  # Longer delay in low quality mode
-                else:
-                    time.sleep(0.05)  # Shorter delay for better responsiveness
+                elapsed = time.time() - loop_start
+                # In low quality mode, we can afford slightly lower FPS target
+                effective_period = frame_period * (1.5 if self.low_quality_mode else 1.0)
+                sleep_left = max(0.0, effective_period - elapsed)
+                if sleep_left > 0:
+                    time.sleep(sleep_left)
                 
         except KeyboardInterrupt:
             logger.info("Detection loop interrupted by user")
@@ -1316,7 +1366,17 @@ def create_default_config():
             "width": 128,
             "height": 64,
             "update_interval": 1.0,
-            "show_system_info": True
+            "show_system_info": True,
+            "rotate": 0,
+            "invert": False,
+            "spi": {
+                "bus": 0,
+                "device": 0,
+                "baudrate": 8000000,
+                "dc_pin_bcm": 25,
+                "rst_pin_bcm": 24,
+                "driver": "ssd1309"
+            }
         }
     }
     

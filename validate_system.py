@@ -319,6 +319,7 @@ class SystemValidator:
         
         oled_results = {
             'i2c_available': False,
+            'spi_available': False,
             'display_detected': False,
             'libraries_available': False,
             'display_test': False
@@ -328,6 +329,17 @@ class SystemValidator:
             print("⚠️  Not on Raspberry Pi, skipping OLED test")
             self.validation_results['oled'] = oled_results
             return False
+        
+        # Check SPI device nodes
+        try:
+            spi_nodes = [p for p in ['/dev/spidev0.0', '/dev/spidev0.1'] if os.path.exists(p)]
+            if spi_nodes:
+                oled_results['spi_available'] = True
+                print(f"✅ SPI interface available ({', '.join(spi_nodes)})")
+            else:
+                print("⚠️  SPI interface nodes not found (/dev/spidev0.*)")
+        except Exception:
+            pass
         
         # Check I2C
         try:
@@ -397,6 +409,7 @@ class SystemValidator:
                 draw.text((10, 36), "SPI OK", fill=255, font=font)
             time.sleep(1)
             oled_results['display_test'] = True
+            oled_results['display_detected'] = True
             print("✅ SPI OLED (luma.oled) test successful")
         except Exception as e:
             print(f"⚠️  SPI OLED (luma.oled) test failed: {e}")
