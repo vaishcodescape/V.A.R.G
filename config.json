@@ -29,8 +29,15 @@
       "cs_pin": "CE0",
       "dc_pin": "D25",
       "rst_pin": "D24",
-      "baudrate": 2000000
-    }
+      "baudrate": 2000000,
+      "bus": 0,
+      "device": 0,
+      "dc_pin_bcm": 25,
+      "rst_pin_bcm": 24,
+      "driver": "ssd1309"
+    },
+    "rotate": 0,
+    "invert": false
   },
   "tflite": {
     "enabled": true,

@@ -152,6 +152,7 @@ install_system_deps() {
         zlib1g-dev
         i2c-tools
         fonts-dejavu-core
+        python3-luma.oled
     )
 
     # Install base in batch for speed
@@ -403,6 +404,18 @@ EOF
     create_service
     create_startup_script
     create_monitoring_script
+    
+    # Ensure luma.oled present if apt package was unavailable
+    print_status "Verifying luma.oled availability..."
+    python3 - << 'PY'
+import importlib, subprocess, sys
+try:
+    importlib.import_module('luma.oled')
+    print("luma.oled present")
+except Exception:
+    print("luma.oled missing; installing via pip (fallback)")
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', 'luma.oled>=3.13.0'], check=False)
+PY
     
     echo ""
     print_status "V.A.R.G deployment complete!"

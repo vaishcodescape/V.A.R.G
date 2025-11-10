@@ -21,6 +21,7 @@ sudo apt install -y \
     python3-dotenv \
     python3-picamera2 \
     python3-opencv \
+    python3-luma.oled \
     libjpeg-dev \
     libatlas-base-dev \
     zlib1g-dev \
@@ -54,6 +55,15 @@ pip install --upgrade pip setuptools wheel
 # Install Python dependencies (remaining, platform-guarded)
 echo "📚 Installing Python dependencies..."
 pip install -r requirements.txt || true
+
+# Ensure luma.oled present if apt package unavailable
+python3 - << 'PY'
+import importlib, subprocess, sys
+try:
+    importlib.import_module('luma.oled')
+except Exception:
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', 'luma.oled>=3.13.0'], check=False)
+PY
 
 # Create necessary directories
 echo "📁 Creating directories..."

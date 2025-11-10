@@ -350,58 +350,56 @@ class SystemValidator:
         except Exception as e:
             print(f"⚠️  I2C test failed: {e}")
         
-        # Test OLED libraries
+        # Try SPI OLED via luma.oled (preferred, SPI-only as requested)
         try:
-            import board
-            import adafruit_displayio_ssd1306
-            import displayio
-            from PIL import Image, ImageDraw, ImageFont
-            
+            from luma.core.interface.serial import spi as luma_spi
+            from luma.core.render import canvas as luma_canvas
+            try:
+                from luma.oled.device import ssd1309 as luma_ssd1309
+                L_SSD1309 = True
+            except Exception:
+                L_SSD1309 = False
+            from luma.oled.device import ssd1306 as luma_ssd1306
+            from PIL import ImageFont
             oled_results['libraries_available'] = True
-            print("✅ OLED libraries available")
+            print("✅ luma.oled libraries available")
             
-            # Test display initialization (if detected)
-            if oled_results['display_detected']:
-                try:
-                    displayio.release_displays()
-                    i2c = board.I2C()
-                    display_bus = displayio.I2CDisplay(i2c, device_address=0x3D)
-                    display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=128, height=64)
-                    
-                    # Create test image
-                    img = Image.new('1', (128, 64), 0)
-                    draw = ImageDraw.Draw(img)
-                    draw.text((10, 20), "V.A.R.G", fill=1)
-                    draw.text((10, 35), "Test OK", fill=1)
-                    
-                    # Convert and display
-                    bitmap = displayio.Bitmap(128, 64, 2)
-                    for y in range(64):
-                        for x in range(128):
-                            pixel = img.getpixel((x, y))
-                            bitmap[x, y] = 1 if pixel else 0
-                    
-                    palette = displayio.Palette(2)
-                    palette[0] = 0x000000
-                    palette[1] = 0xFFFFFF
-                    
-                    tile_grid = displayio.TileGrid(bitmap, pixel_shader=palette)
-                    group = displayio.Group()
-                    group.append(tile_grid)
-                    display.show(group)
-                    
-                    oled_results['display_test'] = True
-                    print("✅ OLED display test successful")
-                    
-                    # Clear display after test
-                    time.sleep(2)
-                    display.show(displayio.Group())
-                    
-                except Exception as e:
-                    print(f"⚠️  OLED display test failed: {e}")
+            # Load SPI pin config if present
+            spi_cfg = {'bus': 0, 'device': 0, 'dc_pin_bcm': 25, 'rst_pin_bcm': 24, 'baudrate': 8000000, 'driver': 'ssd1309'}
+            try:
+                if os.path.exists('config.json'):
+                    with open('config.json', 'r') as f:
+                        cfg = json.load(f)
+                        spi_cfg.update((cfg.get('oled_display', {}) or {}).get('spi', {}) or {})
+            except Exception:
+                pass
             
+            serial = luma_spi(port=int(spi_cfg.get('bus', 0)),
+                              device=int(spi_cfg.get('device', 0)),
+                              gpio_DC=int(spi_cfg.get('dc_pin_bcm', 25)),
+                              gpio_RST=int(spi_cfg.get('rst_pin_bcm', 24)),
+                              bus_speed_hz=int(spi_cfg.get('baudrate', 8000000)))
+            driver = str(spi_cfg.get('driver', 'ssd1309')).lower()
+            if driver == 'ssd1309' and L_SSD1309:
+                device = luma_ssd1309(serial, width=128, height=64)
+            elif driver == 'ssd1306':
+                device = luma_ssd1306(serial, width=128, height=64)
+            else:
+                device = luma_ssd1309(serial, width=128, height=64) if L_SSD1309 else luma_ssd1306(serial, width=128, height=64)
+            
+            # Render simple text
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+            except Exception:
+                font = None
+            with luma_canvas(device) as draw:
+                draw.text((10, 20), "V.A.R.G", fill=255, font=font)
+                draw.text((10, 36), "SPI OK", fill=255, font=font)
+            time.sleep(1)
+            oled_results['display_test'] = True
+            print("✅ SPI OLED (luma.oled) test successful")
         except Exception as e:
-            print(f"⚠️  OLED libraries not available: {e}")
+            print(f"⚠️  SPI OLED (luma.oled) test failed: {e}")
         
         self.validation_results['oled'] = oled_results
         return oled_results['libraries_available']

@@ -80,6 +80,20 @@ try:
 except Exception:
     WAVESHARE_AVAILABLE = False
 
+# Prefer lightweight luma.oled SPI driver for Pi Zero W
+try:
+    from luma.core.interface.serial import spi as luma_spi
+    from luma.core.render import canvas as luma_canvas
+    from luma.oled.device import ssd1306 as luma_ssd1306
+    try:
+        from luma.oled.device import ssd1309 as luma_ssd1309
+        LUMA_SSD1309_AVAILABLE = True
+    except Exception:
+        LUMA_SSD1309_AVAILABLE = False
+    LUMA_AVAILABLE = True
+except Exception:
+    LUMA_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -324,17 +338,17 @@ class OLEDDisplay:
         self.width = self.config.get("width", 128)
         self.height = self.config.get("height", 64)
         self.display = None
+        self.luma_device = None
         self.font = None
         self.small_font = None
+        self.rotate = int(self.config.get("rotate", 0) or 0)
+        self.invert = bool(self.config.get("invert", False))
         
-        if OLED_AVAILABLE:
-            self.init_display()
-        else:
-            logger.warning("OLED display not available")
+        self.init_display()
     
     def show_message(self, lines):
         """Show a simple multi-line centered message on the OLED."""
-        if not OLED_AVAILABLE or not self.display:
+        if not self.display and not self.luma_device:
             return
         try:
             img = Image.new('1', (self.width, self.height), 0)
@@ -366,24 +380,58 @@ class OLEDDisplay:
         self.show_message(["V.A.R.G", "Food Calorie Detector"])
     
     def init_display(self):
-        """Initialize the OLED display using SPI."""
-        logger.info("Initializing OLED display with type: SPI")
+        """Initialize the OLED display using SPI (prefer luma.oled)."""
+        logger.info("Initializing OLED display (SPI)...")
         
+        # Load fonts
         try:
-            self.init_spi_display()
+            self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+            self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+        except (OSError, IOError):
+            self.font = ImageFont.load_default()
+            self.small_font = ImageFont.load_default()
 
-            # Load fonts
+        # Attempt luma.oled SPI first (fastest, reliable on Pi)
+        if LUMA_AVAILABLE:
             try:
-                self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
-                self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
-            except (OSError, IOError):
-                self.font = ImageFont.load_default()
-                self.small_font = ImageFont.load_default()
+                spi_cfg = self.config.get("spi", {}) if isinstance(self.config.get("spi", {}), dict) else {}
+                bus = int(spi_cfg.get("bus", 0))
+                device = int(spi_cfg.get("device", 0))
+                baudrate = int(spi_cfg.get("baudrate", 8000000))
+                gpio_dc = int(spi_cfg.get("dc_pin_bcm", 25))
+                gpio_rst = int(spi_cfg.get("rst_pin_bcm", 24))
+                driver = str(spi_cfg.get("driver", "ssd1309")).lower()
+                
+                serial = luma_spi(port=bus, device=device, gpio_DC=gpio_dc, gpio_RST=gpio_rst, bus_speed_hz=baudrate)
+                if driver == "ssd1306":
+                    device_obj = luma_ssd1306(serial, width=self.width, height=self.height)
+                elif driver == "ssd1309" and LUMA_SSD1309_AVAILABLE:
+                    device_obj = luma_ssd1309(serial, width=self.width, height=self.height)
+                else:
+                    # Fallback order: SSD1309 -> SSD1306
+                    device_obj = luma_ssd1309(serial, width=self.width, height=self.height) if LUMA_SSD1309_AVAILABLE else luma_ssd1306(serial, width=self.width, height=self.height)
+                
+                # Apply rotation/inversion if requested
+                try:
+                    if self.rotate:
+                        device_obj.rotate = self.rotate
+                except Exception:
+                    pass
+                self.luma_device = device_obj
+                logger.info(f"OLED initialized via luma.oled ({driver}, SPI {bus}.{device}, DC={gpio_dc}, RST={gpio_rst})")
+                return
+            except Exception as e:
+                logger.warning(f"luma.oled SPI init failed: {e}")
+        
+        # Fallback to Waveshare SPI driver
+        try:
+            self.init_spi_display_waveshare_or_displayio()
+            return
         except Exception as e:
-            logger.error(f"Failed to initialize OLED display (SPI): {e}")
+            logger.error(f"Failed to initialize OLED display (fallbacks): {e}")
             self.display = None
 
-    def init_spi_display(self):
+    def init_spi_display_waveshare_or_displayio(self):
         """Initialize SPI-based OLED display."""
         # Prefer Waveshare driver for 1.51" SPI OLEDs (SSD1309/SSD1306)
         if WAVESHARE_AVAILABLE:
@@ -400,6 +448,8 @@ class OLEDDisplay:
             logger.info("OLED display initialized via Waveshare driver (SPI)")
         else:
             # Fallback to displayio SSD1306 over SPI
+            if not OLED_AVAILABLE or not DISPLAYIO_SSD1306_AVAILABLE:
+                raise RuntimeError("SPI display fallback unavailable (displayio/adfr SSD1306 not installed)")
             displayio.release_displays()
             spi_config = self.config.get("spi", {})
             cs_pin_name = spi_config.get("cs_pin", "CE0")
@@ -422,8 +472,6 @@ class OLEDDisplay:
             display_bus = displayio.FourWire(
                 spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=baudrate
             )
-            if not DISPLAYIO_SSD1306_AVAILABLE:
-                raise RuntimeError("displayio SSD1306 driver not available and Waveshare driver not found")
             self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
             logger.info("OLED display initialized via displayio SSD1306 (SPI)")
 
@@ -491,20 +539,43 @@ class OLEDDisplay:
     
     def update_display(self, image: Image.Image):
         """Update the OLED display with new image"""
-        if not self.display:
+        # No device initialized
+        if not self.display and not self.luma_device:
             return
         
         try:
+            frame = image.convert('1')
+            if self.rotate:
+                try:
+                    frame = frame.rotate(self.rotate, expand=False)
+                except Exception:
+                    pass
+            if self.invert:
+                try:
+                    frame = Image.eval(frame, lambda p: 255 - p)
+                except Exception:
+                    pass
+
+            if self.luma_device is not None:
+                # luma device rendering
+                try:
+                    self.luma_device.display(frame)
+                except Exception:
+                    # Use canvas fallback
+                    with luma_canvas(self.luma_device) as draw:
+                        draw.bitmap((0, 0), frame, fill=1)
+                return
+
             if WAVESHARE_AVAILABLE and isinstance(self.display, WS_OLED_1in51.OLED_1in51):
-                # Waveshare driver expects rotated buffer for 1.51\" panel
-                frame = image.convert('1').rotate(180)
-                self.display.ShowImage(self.display.getbuffer(frame))
+                # Waveshare driver expects rotated buffer for 1.51" panel
+                frame_ws = frame.rotate(180)
+                self.display.ShowImage(self.display.getbuffer(frame_ws))
             else:
                 # displayio path
                 bitmap = displayio.Bitmap(self.width, self.height, 2)
                 for y in range(self.height):
                     for x in range(self.width):
-                        pixel = image.getpixel((x, y))
+                        pixel = frame.getpixel((x, y))
                         bitmap[x, y] = 1 if pixel else 0
                 palette = displayio.Palette(2)
                 palette[0] = 0x000000
