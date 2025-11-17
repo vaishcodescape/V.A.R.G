@@ -67,6 +67,17 @@ except Exception:
     subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', 'luma.oled>=3.13.0'], check=False)
 PY
 
+# Install Waveshare OLED library (required for 1.51" OLED)
+echo "📦 Installing Waveshare OLED library..."
+if [ -d "RaspberryPi/python" ] && [ -f "RaspberryPi/python/setup.py" ]; then
+    cd RaspberryPi/python
+    sudo python3 setup.py install || echo "⚠️  Waveshare OLED installation failed - may need manual setup"
+    cd ../..
+else
+    echo "⚠️  Waveshare OLED library directory not found - skipping installation"
+    echo "   To install manually: cd RaspberryPi/python && sudo python3 setup.py install"
+fi
+
 # Create necessary directories
 echo "📁 Creating directories..."
 mkdir -p detections
