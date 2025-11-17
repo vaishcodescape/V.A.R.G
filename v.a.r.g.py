@@ -67,6 +67,9 @@ except ImportError:
 try:
     from picamera2 import Picamera2
     PI_CAMERA_AVAILABLE = True
+    # Suppress libcamera INFO messages
+    import os
+    os.environ['LIBCAMERA_LOG_LEVELS'] = 'ERROR'
 except ImportError:
     PI_CAMERA_AVAILABLE = False
     logging.warning("Picamera2 not available, falling back to OpenCV")
@@ -366,6 +369,7 @@ class OLEDDisplay:
     def show_message(self, lines):
         """Show a simple multi-line centered message on the OLED."""
         if not self.display and not self.luma_device:
+            logger.debug(f"OLED not initialized - display={self.display is not None}, luma_device={self.luma_device is not None}")
             return
         try:
             img = Image.new('1', (self.width, self.height), 0)
@@ -419,22 +423,27 @@ class OLEDDisplay:
     def init_display(self):
         """Initialize the OLED display using SPI (prefer luma.oled)."""
         logger.info("Initializing OLED display (SPI)...")
+        logger.info(f"OLED config: {self.config}")
         
         # Load fonts
         try:
             self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
             self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+            logger.debug("Loaded DejaVu fonts")
         except (OSError, IOError):
             try:
                 # Try alternative font paths
                 self.font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 12)
                 self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 10)
+                logger.debug("Loaded Liberation fonts")
             except (OSError, IOError):
                 self.font = ImageFont.load_default()
                 self.small_font = ImageFont.load_default()
+                logger.debug("Using default fonts")
 
         # Attempt luma.oled SPI first (fastest, reliable on Pi)
         if LUMA_AVAILABLE:
+            logger.info("Attempting luma.oled initialization...")
             try:
                 spi_cfg = self.config.get("spi", {}) if isinstance(self.config.get("spi", {}), dict) else {}
                 bus = int(spi_cfg.get("bus", 0))
@@ -444,6 +453,7 @@ class OLEDDisplay:
                 gpio_rst = int(spi_cfg.get("rst_pin_bcm", 24))
                 driver = str(spi_cfg.get("driver", "ssd1309")).lower()
                 
+                logger.info(f"Trying luma.oled: bus={bus}, device={device}, baudrate={baudrate}, DC={gpio_dc}, RST={gpio_rst}, driver={driver}")
                 serial = luma_spi(port=bus, device=device, gpio_DC=gpio_dc, gpio_RST=gpio_rst, bus_speed_hz=baudrate)
                 if driver == "ssd1306":
                     device_obj = luma_ssd1306(serial, width=self.width, height=self.height)
@@ -460,18 +470,32 @@ class OLEDDisplay:
                 except Exception:
                     pass
                 self.luma_device = device_obj
-                logger.info(f"OLED initialized via luma.oled ({driver}, SPI {bus}.{device}, DC={gpio_dc}, RST={gpio_rst})")
+                logger.info(f"✅ OLED initialized via luma.oled ({driver}, SPI {bus}.{device}, DC={gpio_dc}, RST={gpio_rst})")
+                # Test display with a simple message
+                try:
+                    test_img = Image.new('1', (self.width, self.height), 0)
+                    test_draw = ImageDraw.Draw(test_img)
+                    test_draw.text((10, 20), "OLED OK", font=self.font, fill=1)
+                    self.update_display(test_img)
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"OLED test display failed: {e}")
                 return
             except Exception as e:
                 logger.warning(f"luma.oled SPI init failed: {e}")
+                import traceback
+                logger.debug(f"luma.oled error details: {traceback.format_exc()}")
         
         # Fallback to Waveshare SPI driver
+        logger.info("Attempting Waveshare/displayio initialization...")
         try:
             self.init_spi_display_waveshare_or_displayio()
+            logger.info("✅ OLED initialized via Waveshare/displayio")
             return
         except Exception as e:
             logger.warning(f"OLED display initialization failed: {e}")
-            logger.info("Continuing without OLED display. Connect display and restart to enable.")
+            logger.warning("Continuing without OLED display. Check SPI connections and config.")
+            logger.warning(f"Available drivers: LUMA={LUMA_AVAILABLE}, WAVESHARE={WAVESHARE_AVAILABLE}, DISPLAYIO={DISPLAYIO_SSD1306_AVAILABLE}")
             self.display = None
             self.luma_device = None
 
@@ -546,11 +570,11 @@ class OLEDDisplay:
             # Center text horizontally
             try:
                 name_w, name_h = draw.textsize(name, font=self.font)
-                cal_w, cal_h = draw.textsize(calories_text, font=self.small_font)
+                cal_w, _ = draw.textsize(calories_text, font=self.small_font)
             except Exception:
                 # Fallback sizes if PIL lacks textsize
                 name_w, name_h = (len(name) * 6, 12)
-                cal_w, cal_h = (len(calories_text) * 6, 10)
+                cal_w, _ = (len(calories_text) * 6, 10)
             
             name_x = max(0, (self.width - name_w) // 2)
             cal_x = max(0, (self.width - cal_w) // 2)
@@ -732,11 +756,17 @@ class FoodDetector:
         self.oled_display = OLEDDisplay(config=self.config.get("oled_display", {}))
         # Show startup splash
         try:
-            self.oled_display.show_startup()
-            # Brief pause so the splash is visible even if we fail early
-            time.sleep(2.0)
+            if self.oled_display.display or self.oled_display.luma_device:
+                self.oled_display.show_startup()
+                logger.info("OLED startup message displayed")
+                # Brief pause so the splash is visible even if we fail early
+                time.sleep(2.0)
+            else:
+                logger.warning("OLED display not initialized - check SPI connections and config")
         except Exception as e:
-            logger.debug(f"OLED startup message failed: {e}")
+            logger.error(f"OLED startup message failed: {e}")
+            import traceback
+            logger.debug(f"OLED error details: {traceback.format_exc()}")
         
         # Remote inference client (optional)
         self.remote_client = RemoteInferenceClient(
@@ -904,7 +934,7 @@ class FoodDetector:
                             pass
                         self.picamera2 = None
             
-            # Fallback: try USB camera via OpenCV if available
+            # Fallback: try USB camera via OpenCV if available (silently)
             if OPENCV_AVAILABLE:
                 try:
                     cam_index = int(self.config.get("camera_index", 0))
@@ -914,7 +944,14 @@ class FoodDetector:
                             # Suppress OpenCV warnings for this operation
                             with warnings.catch_warnings():
                                 warnings.filterwarnings("ignore")
-                                cam = cv2.VideoCapture(idx, cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else cv2.CAP_ANY)
+                                # Suppress stderr for OpenCV operations
+                                import sys
+                                old_stderr = sys.stderr
+                                try:
+                                    sys.stderr = open(os.devnull, 'w')
+                                    cam = cv2.VideoCapture(idx, cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else cv2.CAP_ANY)
+                                finally:
+                                    sys.stderr = old_stderr
                             if cam.isOpened():
                                 cam.set(cv2.CAP_PROP_FRAME_WIDTH, self.config["camera_width"])
                                 cam.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config["camera_height"])
@@ -927,11 +964,9 @@ class FoodDetector:
                             cam.release()
                         except Exception:
                             continue
-                    # Only log if we actually tried (not just skipped)
-                    if cam_index == 0:
-                        logger.debug("No USB cameras found via OpenCV")
-                except Exception as e:
-                    logger.debug(f"OpenCV USB camera check skipped: {e}")
+                    # Don't log - camera not available is expected
+                except Exception:
+                    pass
             
             # No cameras available
             logger.info("No cameras detected. Camera operations will be skipped.")
