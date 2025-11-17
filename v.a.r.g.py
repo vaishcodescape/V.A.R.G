@@ -91,12 +91,20 @@ except ImportError:
     OLED_AVAILABLE = False
     logging.warning("OLED display libraries not available")
 
-# Optional: Waveshare SPI OLED driver (SSD1309/SSD1306 variants)
+# Waveshare SPI OLED driver (SSD1309/SSD1306 variants) - PRIMARY DRIVER
+WAVESHARE_AVAILABLE = False
+WS_OLED_1in51 = None
 try:
     from waveshare_OLED import OLED_1in51 as WS_OLED_1in51
     WAVESHARE_AVAILABLE = True
-except Exception:
-    WAVESHARE_AVAILABLE = False
+    logging.info("✅ Waveshare OLED library imported successfully")
+except ImportError as e:
+    logging.warning(f"Waveshare OLED library not found: {e}")
+    logging.warning("Install Waveshare OLED library or ensure it's in the path")
+except Exception as e:
+    logging.warning(f"Error importing Waveshare OLED: {e}")
+    import traceback
+    logging.debug(f"Import error details: {traceback.format_exc()}")
 
 # Prefer lightweight luma.oled SPI driver for Pi Zero W
 try:
@@ -423,9 +431,10 @@ class OLEDDisplay:
         self.show_message(["V.A.R.G", "Food Calorie", "Detector"])
     
     def init_display(self):
-        """Initialize the OLED display using SPI (prefer luma.oled)."""
-        logger.info("Initializing OLED display (SPI)...")
+        """Initialize the OLED display using Waveshare driver only."""
+        logger.info("Initializing OLED display (Waveshare SPI)...")
         logger.info(f"OLED config: {self.config}")
+        logger.info(f"WAVESHARE_AVAILABLE: {WAVESHARE_AVAILABLE}")
         
         # Load fonts
         try:
@@ -443,163 +452,77 @@ class OLEDDisplay:
                 self.small_font = ImageFont.load_default()
                 logger.debug("Using default fonts")
 
-        # Try Waveshare first (since we know it works)
-        if WAVESHARE_AVAILABLE:
-            logger.info("Attempting Waveshare OLED initialization (priority)...")
-            try:
-                self.init_spi_display_waveshare_or_displayio()
-                logger.info("✅ OLED initialized via Waveshare")
-                return
-            except Exception as e:
-                logger.warning(f"Waveshare OLED init failed: {e}")
+        # Use Waveshare ONLY (as per user requirement)
+        if not WAVESHARE_AVAILABLE:
+            logger.error("Waveshare OLED library not available!")
+            logger.error("Please ensure waveshare_OLED is installed and in Python path")
+            logger.error("The library should be in the same directory or in sys.path")
+            self.display = None
+            self.luma_device = None
+            return
         
-        # Attempt luma.oled SPI (fallback)
-        if LUMA_AVAILABLE:
-            logger.info("Attempting luma.oled initialization...")
-            try:
-                spi_cfg = self.config.get("spi", {}) if isinstance(self.config.get("spi", {}), dict) else {}
-                # Handle both "port" and "bus" for compatibility
-                bus = int(spi_cfg.get("bus", spi_cfg.get("port", 0)))
-                device = int(spi_cfg.get("device", 0))
-                baudrate = int(spi_cfg.get("baudrate", 8000000))
-                gpio_dc = int(spi_cfg.get("dc_pin_bcm", 25))
-                gpio_rst = int(spi_cfg.get("rst_pin_bcm", 24))
-                driver = str(spi_cfg.get("driver", "ssd1309")).lower()
-                
-                logger.info(f"Trying luma.oled: bus={bus}, device={device}, baudrate={baudrate}, DC={gpio_dc}, RST={gpio_rst}, driver={driver}")
-                
-                # Check if SPI is enabled
-                try:
-                    import subprocess
-                    result = subprocess.run(['ls', '/dev/spidev*'], capture_output=True, text=True, timeout=1)
-                    if result.returncode != 0 or not result.stdout.strip():
-                        logger.warning("SPI devices not found. Enable SPI in raspi-config: sudo raspi-config -> Interface Options -> SPI -> Enable")
-                except Exception:
-                    pass  # Ignore if check fails
-                
-                serial = luma_spi(port=bus, device=device, gpio_DC=gpio_dc, gpio_RST=gpio_rst, bus_speed_hz=baudrate)
-                if driver == "ssd1306":
-                    device_obj = luma_ssd1306(serial, width=self.width, height=self.height)
-                elif driver == "ssd1309" and LUMA_SSD1309_AVAILABLE:
-                    device_obj = luma_ssd1309(serial, width=self.width, height=self.height)
-                else:
-                    # Fallback order: SSD1309 -> SSD1306
-                    device_obj = luma_ssd1309(serial, width=self.width, height=self.height) if LUMA_SSD1309_AVAILABLE else luma_ssd1306(serial, width=self.width, height=self.height)
-                
-                # Apply rotation/inversion if requested
-                try:
-                    if self.rotate:
-                        device_obj.rotate = self.rotate
-                except Exception:
-                    pass
-                self.luma_device = device_obj
-                logger.info(f"✅ OLED initialized via luma.oled ({driver}, SPI {bus}.{device}, DC={gpio_dc}, RST={gpio_rst})")
-                # Test display with a simple message
-                try:
-                    test_img = Image.new('1', (self.width, self.height), 0)
-                    test_draw = ImageDraw.Draw(test_img)
-                    test_draw.text((10, 20), "OLED OK", font=self.font, fill=1)
-                    self.update_display(test_img)
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(f"OLED test display failed: {e}")
-                return
-            except PermissionError as e:
-                logger.error(f"Permission denied accessing SPI. Try: sudo usermod -a -G spi,gpio $USER (then logout/login)")
-                logger.error(f"Error: {e}")
-            except FileNotFoundError as e:
-                logger.error(f"SPI device not found. Enable SPI in raspi-config: sudo raspi-config -> Interface Options -> SPI -> Enable")
-                logger.error(f"Error: {e}")
-            except Exception as e:
-                logger.warning(f"luma.oled SPI init failed: {e}")
-                import traceback
-                logger.debug(f"luma.oled error details: {traceback.format_exc()}")
-        
-        # Fallback to displayio (if Waveshare not tried yet)
-        logger.info("Attempting displayio initialization...")
+        logger.info("Attempting Waveshare OLED initialization...")
         try:
-            self.init_spi_display_waveshare_or_displayio()
-            logger.info("✅ OLED initialized via displayio")
+            self.init_spi_display_waveshare()
+            logger.info("✅ OLED initialized via Waveshare")
             return
         except Exception as e:
-            logger.warning(f"OLED display initialization failed: {e}")
-            logger.warning("Continuing without OLED display.")
-            logger.info("Troubleshooting:")
-            logger.info("  1. Check SPI is enabled: sudo raspi-config -> Interface Options -> SPI -> Enable")
-            logger.info("  2. Verify SPI devices exist: ls /dev/spidev*")
-            logger.info("  3. Check permissions: sudo usermod -a -G spi,gpio $USER (then logout/login)")
-            logger.info("  4. Verify wiring: DC pin, RST pin, SPI connections")
-            logger.info(f"  5. Available drivers: LUMA={LUMA_AVAILABLE}, WAVESHARE={WAVESHARE_AVAILABLE}, DISPLAYIO={DISPLAYIO_SSD1306_AVAILABLE}")
-            logger.info(f"  6. Config used: {self.config.get('spi', {})}")
+            logger.error(f"Waveshare OLED initialization failed: {e}")
+            import traceback
+            logger.error(f"Error details: {traceback.format_exc()}")
+            logger.error("Troubleshooting:")
+            logger.error("  1. Check SPI is enabled: sudo raspi-config -> Interface Options -> SPI -> Enable")
+            logger.error("  2. Verify SPI devices exist: ls /dev/spidev*")
+            logger.error("  3. Check permissions: sudo usermod -a -G spi,gpio $USER (then logout/login)")
+            logger.error("  4. Verify wiring: DC pin, RST pin, SPI connections")
+            logger.error(f"  5. Config used: {self.config.get('spi', {})}")
             self.display = None
             self.luma_device = None
 
-    def init_spi_display_waveshare_or_displayio(self):
-        """Initialize SPI-based OLED display."""
-        # Prefer Waveshare driver for 1.51" SPI OLEDs (SSD1309/SSD1306)
-        if WAVESHARE_AVAILABLE:
-            try:
-                self.ws = WS_OLED_1in51.OLED_1in51()
-                logger.info("Waveshare OLED object created")
-                # Initialize library
-                self.ws.Init()
-                logger.info("Waveshare OLED Init() called")
-                # Clear display
-                self.ws.clear()
-                logger.info("Waveshare OLED cleared")
-                # Use panel-reported dimensions
-                try:
-                    self.width = getattr(self.ws, "width", self.width)
-                    self.height = getattr(self.ws, "height", self.height)
-                    logger.info(f"OLED dimensions: {self.width}x{self.height}")
-                except Exception as e:
-                    logger.debug(f"Could not get dimensions: {e}")
-                self.display = self.ws  # mark as initialized
-                logger.info("✅ OLED display initialized via Waveshare driver (SPI)")
-                # Test display
-                try:
-                    test_img = Image.new('1', (self.width, self.height), "WHITE")
-                    test_draw = ImageDraw.Draw(test_img)
-                    test_draw.text((10, 20), "OLED OK", font=self.font, fill=0)
-                    test_img = test_img.rotate(180)
-                    self.ws.ShowImage(self.ws.getbuffer(test_img))
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(f"OLED test display failed: {e}")
-            except Exception as e:
-                logger.error(f"Waveshare OLED initialization failed: {e}")
-                import traceback
-                logger.debug(f"Waveshare error details: {traceback.format_exc()}")
-                raise
-        else:
-            # Fallback to displayio SSD1306 over SPI
-            if not OLED_AVAILABLE or not DISPLAYIO_SSD1306_AVAILABLE:
-                # Don't raise error, just return - will be handled by caller
-                return
-            displayio.release_displays()
-            spi_config = self.config.get("spi", {})
-            cs_pin_name = spi_config.get("cs_pin", "CE0")
-            dc_pin_name = spi_config.get("dc_pin", "D25")
-            rst_pin_name = spi_config.get("rst_pin", "D24")
-            baudrate = spi_config.get("baudrate", 2000000)
-
-            spi = busio.SPI(board.SCLK, board.MOSI)
-            
-            try:
-                cs_pin = getattr(board, cs_pin_name)
-            except AttributeError:
-                logger.error(f"Invalid CS pin name '{cs_pin_name}', defaulting to CE0.")
-                cs_pin = board.CE0
-
-            tft_cs = digitalio.DigitalInOut(cs_pin)
-            tft_dc = digitalio.DigitalInOut(getattr(board, dc_pin_name))
-            tft_rst = digitalio.DigitalInOut(getattr(board, rst_pin_name))
-
-            display_bus = displayio.FourWire(
-                spi, command=tft_dc, chip_select=tft_cs, reset=tft_rst, baudrate=baudrate
-            )
-            self.display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=self.width, height=self.height)
-            logger.info("OLED display initialized via displayio SSD1306 (SPI)")
+    def init_spi_display_waveshare(self):
+        """Initialize Waveshare SPI-based OLED display (ONLY driver)."""
+        if not WAVESHARE_AVAILABLE or WS_OLED_1in51 is None:
+            raise RuntimeError("Waveshare OLED library not available")
+        
+        logger.info("Creating Waveshare OLED_1in51 object...")
+        self.ws = WS_OLED_1in51.OLED_1in51()
+        logger.info("✅ Waveshare OLED object created")
+        
+        # Initialize library
+        logger.info("Calling Init()...")
+        self.ws.Init()
+        logger.info("✅ Waveshare OLED Init() called")
+        
+        # Clear display
+        logger.info("Clearing display...")
+        self.ws.clear()
+        logger.info("✅ Waveshare OLED cleared")
+        
+        # Use panel-reported dimensions
+        try:
+            self.width = getattr(self.ws, "width", self.width)
+            self.height = getattr(self.ws, "height", self.height)
+            logger.info(f"✅ OLED dimensions: {self.width}x{self.height}")
+        except Exception as e:
+            logger.warning(f"Could not get dimensions from display, using defaults: {e}")
+        
+        self.display = self.ws  # mark as initialized
+        logger.info("✅ OLED display initialized via Waveshare driver (SPI)")
+        
+        # Test display
+        try:
+            logger.info("Testing display with test image...")
+            test_img = Image.new('1', (self.width, self.height), "WHITE")
+            test_draw = ImageDraw.Draw(test_img)
+            test_draw.text((10, 20), "OLED OK", font=self.font, fill=0)
+            test_img = test_img.rotate(180)
+            self.ws.ShowImage(self.ws.getbuffer(test_img))
+            time.sleep(0.5)
+            logger.info("✅ OLED test display successful")
+        except Exception as e:
+            logger.warning(f"OLED test display failed: {e}")
+            import traceback
+            logger.debug(f"Test display error: {traceback.format_exc()}")
 
     def create_food_display(self, foods_data: Dict, food_detected: bool = False, llm_processing: bool = False) -> Image.Image:
         """Create display image showing only food name and calories."""
@@ -668,9 +591,9 @@ class OLEDDisplay:
         self.update_display(img)
     
     def update_display(self, image: Image.Image):
-        """Update the OLED display with new image"""
+        """Update the OLED display with new image (Waveshare only)"""
         # No device initialized
-        if not self.display and not self.luma_device:
+        if not self.display:
             return
         
         try:
@@ -686,55 +609,13 @@ class OLEDDisplay:
             except Exception:
                 pass
 
-            if self.luma_device is not None:
-                # luma device rendering
-                if self.rotate:
-                    try:
-                        frame = frame.rotate(self.rotate, expand=False)
-                    except Exception:
-                        pass
-                if self.invert:
-                    try:
-                        frame = Image.eval(frame, lambda p: 255 - p)
-                    except Exception:
-                        pass
-                try:
-                    self.luma_device.display(frame)
-                except Exception:
-                    # Use canvas fallback
-                    with luma_canvas(self.luma_device) as draw:
-                        draw.bitmap((0, 0), frame, fill=1)
-                return
-
-            if WAVESHARE_AVAILABLE and isinstance(self.display, WS_OLED_1in51.OLED_1in51):
-                # Waveshare driver - rotate 180 degrees like working example
+            # Waveshare driver ONLY - rotate 180 degrees like working example
+            if self.display and hasattr(self.display, 'ShowImage') and hasattr(self.display, 'getbuffer'):
                 frame_ws = frame.rotate(180)
                 # Use ShowImage with getbuffer like working example
                 self.display.ShowImage(self.display.getbuffer(frame_ws))
             else:
-                # displayio path
-                if self.rotate:
-                    try:
-                        frame = frame.rotate(self.rotate, expand=False)
-                    except Exception:
-                        pass
-                if self.invert:
-                    try:
-                        frame = Image.eval(frame, lambda p: 255 - p)
-                    except Exception:
-                        pass
-                bitmap = displayio.Bitmap(self.width, self.height, 2)
-                for y in range(self.height):
-                    for x in range(self.width):
-                        pixel = frame.getpixel((x, y))
-                        bitmap[x, y] = 1 if pixel else 0
-                palette = displayio.Palette(2)
-                palette[0] = 0x000000
-                palette[1] = 0xFFFFFF
-                tile_grid = displayio.TileGrid(bitmap, pixel_shader=palette)
-                group = displayio.Group()
-                group.append(tile_grid)
-                self.display.show(group)
+                logger.warning("Display object doesn't have ShowImage/getbuffer methods")
             
         except Exception as e:
             logger.error(f"Error updating OLED display: {e}")
