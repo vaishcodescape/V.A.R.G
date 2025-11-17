@@ -10,6 +10,7 @@ import numpy as np
 import json
 import time
 import logging
+import warnings
 from datetime import datetime
 from typing import Dict, List
 import os
@@ -21,6 +22,10 @@ import queue
 import gc
 from collections import deque
 import psutil
+
+# Suppress common warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Pillow resampling compatibility (older Pillow on Pi may lack Image.Resampling)
 try:
@@ -43,6 +48,16 @@ TFLITE_AVAILABLE = False
 # Fallback to minimal OpenCV only for camera operations
 try:
     import cv2
+    # Suppress OpenCV warnings - try multiple methods for compatibility
+    try:
+        cv2.setLogLevel(cv2.LOG_LEVEL_SILENT)
+    except AttributeError:
+        try:
+            # Alternative method for older OpenCV
+            import os
+            os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
+        except Exception:
+            pass
     OPENCV_AVAILABLE = True
 except ImportError:
     OPENCV_AVAILABLE = False
@@ -358,18 +373,38 @@ class OLEDDisplay:
             # Choose fonts
             title_font = self.font or ImageFont.load_default()
             text_font = self.small_font or ImageFont.load_default()
-            # Compute total height
+            # Compute total height (handle both old and new PIL API)
             heights = []
             for i, line in enumerate(lines):
                 f = title_font if i == 0 else text_font
-                _, h = f.getsize(line)
+                try:
+                    # New PIL API (Pillow >= 10.0.0)
+                    bbox = draw.textbbox((0, 0), line, font=f)
+                    h = bbox[3] - bbox[1]
+                except (AttributeError, TypeError):
+                    # Old PIL API (getsize method)
+                    try:
+                        _, h = f.getsize(line)
+                    except AttributeError:
+                        # Fallback if getsize doesn't exist
+                        h = 12 if i == 0 else 10
                 heights.append(h)
             total_h = sum(heights) + max(0, (len(lines) - 1)) * 2
             y = max(0, (self.height - total_h) // 2)
             # Draw lines
             for i, line in enumerate(lines):
                 f = title_font if i == 0 else text_font
-                w, h = f.getsize(line)
+                try:
+                    # New PIL API
+                    bbox = draw.textbbox((0, 0), line, font=f)
+                    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                except (AttributeError, TypeError):
+                    # Old PIL API
+                    try:
+                        w, h = f.getsize(line)
+                    except AttributeError:
+                        # Fallback
+                        w, h = len(line) * 6, 12 if i == 0 else 10
                 x = max(0, (self.width - w) // 2)
                 draw.text((x, y), line, font=f, fill=1)
                 y += h + 2
@@ -379,7 +414,7 @@ class OLEDDisplay:
     
     def show_startup(self):
         """Show startup splash to indicate process start."""
-        self.show_message(["V.A.R.G", "Food Calorie Detector"])
+        self.show_message(["V.A.R.G", "Food Calorie", "Detector"])
     
     def init_display(self):
         """Initialize the OLED display using SPI (prefer luma.oled)."""
@@ -390,8 +425,13 @@ class OLEDDisplay:
             self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
             self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
         except (OSError, IOError):
-            self.font = ImageFont.load_default()
-            self.small_font = ImageFont.load_default()
+            try:
+                # Try alternative font paths
+                self.font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 12)
+                self.small_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 10)
+            except (OSError, IOError):
+                self.font = ImageFont.load_default()
+                self.small_font = ImageFont.load_default()
 
         # Attempt luma.oled SPI first (fastest, reliable on Pi)
         if LUMA_AVAILABLE:
@@ -430,8 +470,10 @@ class OLEDDisplay:
             self.init_spi_display_waveshare_or_displayio()
             return
         except Exception as e:
-            logger.error(f"Failed to initialize OLED display (fallbacks): {e}")
+            logger.warning(f"OLED display initialization failed: {e}")
+            logger.info("Continuing without OLED display. Connect display and restart to enable.")
             self.display = None
+            self.luma_device = None
 
     def init_spi_display_waveshare_or_displayio(self):
         """Initialize SPI-based OLED display."""
@@ -451,7 +493,8 @@ class OLEDDisplay:
         else:
             # Fallback to displayio SSD1306 over SPI
             if not OLED_AVAILABLE or not DISPLAYIO_SSD1306_AVAILABLE:
-                raise RuntimeError("SPI display fallback unavailable (displayio/adfr SSD1306 not installed)")
+                # Don't raise error, just return - will be handled by caller
+                return
             displayio.release_displays()
             spi_config = self.config.get("spi", {})
             cs_pin_name = spi_config.get("cs_pin", "CE0")
@@ -691,9 +734,9 @@ class FoodDetector:
         try:
             self.oled_display.show_startup()
             # Brief pause so the splash is visible even if we fail early
-            time.sleep(1.5)
-        except Exception:
-            pass
+            time.sleep(2.0)
+        except Exception as e:
+            logger.debug(f"OLED startup message failed: {e}")
         
         # Remote inference client (optional)
         self.remote_client = RemoteInferenceClient(
@@ -717,8 +760,17 @@ class FoodDetector:
         self.llm_processing = False
         self.camera_unavailable = False
         
-        # Initialize camera (Pi Camera preferred)
+        # Initialize camera (Pi Camera preferred) - skip if not available
         self.init_camera()
+        
+        # If camera not available, show message on OLED
+        if self.camera_unavailable:
+            try:
+                if self.oled_display and (self.oled_display.display or self.oled_display.luma_device):
+                    self.oled_display.show_message(["V.A.R.G", "Camera not", "found"])
+                    time.sleep(1.0)
+            except Exception as e:
+                logger.debug(f"OLED camera message failed: {e}")
         
         # Load food detection models/classifiers
         self.init_detection_models()
@@ -785,7 +837,24 @@ class FoodDetector:
             # Try Pi Camera first (more efficient on Pi Zero W)
             if PI_CAMERA_AVAILABLE:
                 try:
+                    # Check if camera is available before initializing
+                    # Picamera2 may raise errors if no camera is connected
                     self.picamera2 = Picamera2()
+                    
+                    # Check if camera is actually available by trying to get camera info
+                    try:
+                        # Try to get camera controls to verify camera is accessible
+                        _ = self.picamera2.camera_controls
+                    except (IndexError, AttributeError, RuntimeError) as e:
+                        # Camera not available or not accessible
+                        logger.warning(f"Pi Camera not accessible: {e}")
+                        if self.picamera2:
+                            try:
+                                self.picamera2.close()
+                            except Exception:
+                                pass
+                        self.picamera2 = None
+                        raise
                     
                     # Configure for low-resource usage
                     config = self.picamera2.create_preview_configuration(
@@ -798,32 +867,82 @@ class FoodDetector:
                     # Allow camera to warm up
                     time.sleep(2)
                     
+                    # Verify camera is actually working by attempting a test capture
+                    try:
+                        test_frame = self.picamera2.capture_array()
+                        if test_frame is None or test_frame.size == 0:
+                            raise RuntimeError("Camera capture returned empty frame")
+                    except Exception as e:
+                        logger.warning(f"Pi Camera test capture failed: {e}")
+                        if self.picamera2:
+                            try:
+                                self.picamera2.stop()
+                                self.picamera2.close()
+                            except Exception:
+                                pass
+                        self.picamera2 = None
+                        raise
+                    
                     logger.info("Pi Camera module initialized successfully")
+                    self.camera_unavailable = False
                     return
                     
-                except Exception as e:
+                except (IndexError, RuntimeError, AttributeError, OSError) as e:
                     logger.warning(f"Pi Camera initialization failed: {e}")
+                    if self.picamera2:
+                        try:
+                            self.picamera2.close()
+                        except Exception:
+                            pass
+                        self.picamera2 = None
+                except Exception as e:
+                    logger.warning(f"Pi Camera initialization failed (unexpected error): {e}")
+                    if self.picamera2:
+                        try:
+                            self.picamera2.close()
+                        except Exception:
+                            pass
+                        self.picamera2 = None
+            
             # Fallback: try USB camera via OpenCV if available
             if OPENCV_AVAILABLE:
                 try:
                     cam_index = int(self.config.get("camera_index", 0))
-                    cam = cv2.VideoCapture(cam_index)
-                    cam.set(cv2.CAP_PROP_FRAME_WIDTH, self.config["camera_width"])
-                    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config["camera_height"])
-                    ok, _ = cam.read()
-                    if ok:
-                        self.camera = cam
-                        logger.info("USB camera initialized via OpenCV fallback")
-                        return
-                    cam.release()
+                    # Try multiple camera indices (silently, suppress OpenCV errors)
+                    for idx in range(max(0, cam_index), cam_index + 3):
+                        try:
+                            # Suppress OpenCV warnings for this operation
+                            with warnings.catch_warnings():
+                                warnings.filterwarnings("ignore")
+                                cam = cv2.VideoCapture(idx, cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else cv2.CAP_ANY)
+                            if cam.isOpened():
+                                cam.set(cv2.CAP_PROP_FRAME_WIDTH, self.config["camera_width"])
+                                cam.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config["camera_height"])
+                                ok, _ = cam.read()
+                                if ok:
+                                    self.camera = cam
+                                    logger.info(f"USB camera initialized via OpenCV (index {idx})")
+                                    self.camera_unavailable = False
+                                    return
+                            cam.release()
+                        except Exception:
+                            continue
+                    # Only log if we actually tried (not just skipped)
+                    if cam_index == 0:
+                        logger.debug("No USB cameras found via OpenCV")
                 except Exception as e:
-                    logger.warning(f"OpenCV USB camera fallback failed: {e}")
+                    logger.debug(f"OpenCV USB camera check skipped: {e}")
+            
+            # No cameras available
+            logger.info("No cameras detected. Camera operations will be skipped.")
+            logger.info("To enable camera: connect Pi Camera or USB camera and restart.")
+            
             # Show on OLED and mark unavailable
             try:
-                if self.oled_display and self.oled_display.display:
-                    self.oled_display.show_message(["Camera not found", "Check cable &", "raspi-config"])
+                if self.oled_display and (self.oled_display.display or self.oled_display.luma_device):
+                    self.oled_display.show_message(["V.A.R.G", "Camera not", "found"])
                     # Give user a moment to read the message
-                    time.sleep(2)
+                    time.sleep(1)
             except Exception:
                 pass
             self.camera_unavailable = True
@@ -832,6 +951,12 @@ class FoodDetector:
         except Exception as e:
             logger.error(f"Failed to initialize camera: {e}")
             self.camera_unavailable = True
+            if self.picamera2:
+                try:
+                    self.picamera2.close()
+                except Exception:
+                    pass
+                self.picamera2 = None
             return
     
     def init_detection_models(self):
@@ -1121,7 +1246,6 @@ class FoodDetector:
             last_memory_cleanup = 0
             frame_count = 0
             last_scene_sig = None
-            last_camera_retry = 0
             # Cap FPS per config
             target_fps = max(1, int(self.config.get("performance", {}).get("max_fps", 10)))
             frame_period = 1.0 / float(target_fps)
@@ -1133,17 +1257,16 @@ class FoodDetector:
                 # Update performance metrics
                 cpu_usage, memory_usage, fps = self.performance_monitor.update_metrics()
                 
-                # If camera is unavailable, retry periodically and keep OLED message visible
+                # If camera is unavailable, skip camera operations and just show OLED message
                 if (self.picamera2 is None and (not OPENCV_AVAILABLE or self.camera is None)):
-                    if current_time - last_camera_retry > 5:
-                        logger.warning("Camera unavailable; retrying initialization...")
-                        self.init_camera()
-                        last_camera_retry = current_time
+                    # Show camera not found message on OLED continuously
                     try:
-                        if self.oled_display and self.oled_display.display:
-                            self.oled_display.show_message(["Camera not found", "Check cable &", "raspi-config"])
-                    except Exception:
-                        pass
+                        if self.oled_display and (self.oled_display.display or self.oled_display.luma_device):
+                            self.oled_display.show_message(["V.A.R.G", "Camera not", "found"])
+                    except Exception as e:
+                        logger.debug(f"OLED message update failed: {e}")
+                    
+                    # Sleep and continue (skip all camera operations)
                     time.sleep(1.0)
                     continue
                 
