@@ -71,11 +71,12 @@ PY
 echo "📦 Installing Waveshare OLED library..."
 if [ -d "RaspberryPi/python" ] && [ -f "RaspberryPi/python/setup.py" ]; then
     cd RaspberryPi/python
-    sudo python3 setup.py install || echo "⚠️  Waveshare OLED installation failed - may need manual setup"
+    # Use pip instead of setup.py (modern standard)
+    sudo pip3 install -e . || sudo pip3 install . || echo "⚠️  Waveshare OLED installation failed - may need manual setup"
     cd ../..
 else
     echo "⚠️  Waveshare OLED library directory not found - skipping installation"
-    echo "   To install manually: cd RaspberryPi/python && sudo python3 setup.py install"
+    echo "   To install manually: cd RaspberryPi/python && sudo pip3 install ."
 fi
 
 # Create necessary directories

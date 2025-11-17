@@ -25,15 +25,18 @@ fi
 echo "📦 Installing Waveshare OLED library..."
 cd "$RASPBERRY_PI_DIR"
 
-# Install the library
-if command -v python3 &> /dev/null; then
-    echo "   Using python3..."
-    sudo python3 setup.py install
-elif command -v python &> /dev/null; then
-    echo "   Using python..."
-    sudo python setup.py install
+# Install the library using pip (modern standard)
+if command -v pip3 &> /dev/null; then
+    echo "   Using pip3..."
+    sudo pip3 install -e . || sudo pip3 install .
+elif command -v pip &> /dev/null; then
+    echo "   Using pip..."
+    sudo pip install -e . || sudo pip install .
+elif command -v python3 &> /dev/null; then
+    echo "   Using python3 -m pip..."
+    sudo python3 -m pip install -e . || sudo python3 -m pip install .
 else
-    echo "❌ Error: Python not found!"
+    echo "❌ Error: Python/pip not found!"
     exit 1
 fi
 
