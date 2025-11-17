@@ -1,0 +1,38 @@
+{
+  "models_directory": "models",
+  "available_models": {
+    "mobilenet_food_v2": {
+      "url": "https://storage.googleapis.com/tfhub-lite-models/google/lite-model/aiy/vision/classifier/food_V1/1.tflite",
+      "filename": "mobilenet_food_v2.tflite",
+      "labels_url": "https://storage.googleapis.com/tfhub-lite-models/google/lite-model/aiy/vision/classifier/food_V1/1_labels.txt",
+      "labels_filename": "mobilenet_food_v2_labels.txt",
+      "description": "Google's MobileNet V2 food classifier",
+      "size_mb": 10.3,
+      "accuracy": "High",
+      "speed": "Fast"
+    },
+    "food101_mobilenet": {
+      "url": "https://tfhub.dev/google/lite-model/aiy/vision/classifier/food_V1/1?lite-format=tflite",
+      "filename": "food101_mobilenet.tflite",
+      "description": "Food-101 dataset trained MobileNet",
+      "size_mb": 16.9,
+      "accuracy": "Very High",
+      "speed": "Medium"
+    },
+    "efficientnet_food": {
+      "url": "https://storage.googleapis.com/tfhub-lite-models/tensorflow/lite-model/efficientnet/lite0/classification/2.tflite",
+      "filename": "efficientnet_food.tflite",
+      "description": "EfficientNet Lite for food classification",
+      "size_mb": 6.9,
+      "accuracy": "High",
+      "speed": "Very Fast"
+    }
+  },
+  "setup_date": "1762691985.5686455",
+  "usage_instructions": [
+    "1. Run 'python setup_models.py' to download models",
+    "2. Models will be saved in the 'models' directory",
+    "3. V.A.R.G will automatically detect and use available models",
+    "4. For best performance on Pi Zero W, use EfficientNet Lite"
+  ]
+}
