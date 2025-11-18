@@ -58,6 +58,7 @@ except ImportError:
 # Try to import camera and CV libraries
 # NOTE: For Raspberry Pi Zero W, Picamera2 is MUCH more efficient than OpenCV
 # OpenCV works but is resource-heavy. Picamera2 is the recommended choice.
+cv2 = None  # Initialize cv2 as None, will be set if available
 try:
     from picamera2 import Picamera2
     PICAMERA2_AVAILABLE = True
@@ -69,6 +70,7 @@ except ImportError:
         CAMERA_AVAILABLE = True
         logging.warning("Picamera2 not available. Using OpenCV (slower on Pi Zero W)")
     except ImportError:
+        cv2 = None
         CAMERA_AVAILABLE = False
         logging.warning("Camera libraries not available. Using mock detection.")
 
@@ -111,6 +113,11 @@ class FoodDetector:
         # Groq API configuration
         self.groq_api_key = None
         self.groq_model = self.config.get('calorie_estimation_model', 'llama-3.2-11b-vision-preview')
+        # Validate model is a vision model
+        if 'vision' not in self.groq_model.lower() and 'llama3-70b' not in self.groq_model.lower():
+            # Check if it's a known non-vision model
+            if 'llama3-70b-8192' in self.groq_model.lower():
+                logging.warning(f"Model '{self.groq_model}' may not support vision. Consider using 'llama-3.2-11b-vision-preview' for image analysis.")
         self.groq_enabled = False
         self.init_groq()
         
@@ -450,7 +457,7 @@ class FoodDetector:
                 if len(frame.shape) == 3 and frame.shape[2] == 3:
                     # Convert BGR to RGB if needed (more efficient than PIL conversion)
                     try:
-                        if hasattr(cv2, 'COLOR_BGR2RGB'):
+                        if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
                             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         else:
                             frame_rgb = frame
@@ -460,7 +467,7 @@ class FoodDetector:
                     frame_rgb = frame
                 
                 # Use cv2 resize if available (faster than PIL)
-                if hasattr(cv2, 'resize') and frame_rgb.shape[:2] != self.model_input_size:
+                if cv2 is not None and hasattr(cv2, 'resize') and frame_rgb.shape[:2] != self.model_input_size:
                     frame_rgb = cv2.resize(frame_rgb, self.model_input_size, 
                                            interpolation=cv2.INTER_LINEAR)
                     pil_image = Image.fromarray(frame_rgb)
@@ -540,7 +547,13 @@ class FoodDetector:
             # Use downsampled frame for hash (much faster)
             if isinstance(frame, np.ndarray):
                 # Downsample to 32x32 for hash
-                small = cv2.resize(frame, (32, 32), interpolation=cv2.INTER_NEAREST) if hasattr(cv2, 'resize') else frame[::8, ::8]
+                if cv2 is not None and hasattr(cv2, 'resize'):
+                    small = cv2.resize(frame, (32, 32), interpolation=cv2.INTER_NEAREST)
+                else:
+                    # Fallback: simple downsampling without cv2
+                    h, w = frame.shape[:2]
+                    step_h, step_w = max(1, h // 32), max(1, w // 32)
+                    small = frame[::step_h, ::step_w]
                 return hash(small.tobytes())
             return hash(str(frame))
         except Exception:
@@ -597,7 +610,7 @@ class FoodDetector:
                 try:
                     if isinstance(frame, np.ndarray):
                         if len(frame.shape) == 3:
-                            if hasattr(cv2, 'COLOR_BGR2RGB'):
+                            if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
                                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             else:
                                 frame_rgb = frame
@@ -881,6 +894,8 @@ def main():
     finally:
         if detector:
             detector.stop()
+            # Give detection thread a moment to clean up
+            time.sleep(0.5)
         if disp:
             try:
                 disp.clear()
