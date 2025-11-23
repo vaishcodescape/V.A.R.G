@@ -4,10 +4,21 @@ import json
 from pathlib import Path
 import gc
 
-picdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
-libdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'lib')
+# Add library paths for Waveshare OLED
+
+current_dir = os.path.dirname(os.path.realpath(__file__))
+libdir = os.path.join(current_dir, 'Raspberry', 'python', 'lib')
 if os.path.exists(libdir):
     sys.path.append(libdir)
+else:
+    # Fallback to original logic if directory structure is different
+    libdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'lib')
+    if os.path.exists(libdir):
+        sys.path.append(libdir)
+
+picdir = os.path.join(current_dir, 'pic')
+if not os.path.exists(picdir):
+    picdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
 
 import logging
 import time
@@ -16,7 +27,14 @@ import threading
 import base64
 import io
 import re
-from waveshare_OLED import OLED_1in51
+
+# Waveshare OLED import
+try:
+    from waveshare_OLED import OLED_1in51
+except ImportError:
+    logging.warning("waveshare_OLED library not found. Display will not work.")
+    OLED_1in51 = None
+
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
@@ -96,6 +114,10 @@ class FoodDetector:
         self.tflite_interpreter = None
         self.tflite_labels = []
         self.model_input_size = (224, 224)  # Default input size for most food models
+        
+        # Synchronization primitives
+        self.lock = threading.Lock()
+        self.new_data_event = threading.Event()
         
         # Performance optimization: cache tensor details
         self.input_details = None
@@ -229,7 +251,7 @@ class FoodDetector:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Analyze this food image. Identify the food item(s) and estimate the total calories. Respond in JSON format: {\"food\": \"food name\", \"calories\": number}. Be specific about the food item and provide an accurate calorie estimate based on typical serving size."
+                                "text": "Analyze this food image. Identify the food item(s) and estimate the total calories. Respond in JSON format: {\\"food\\": \\"food name\\", \\"calories\\": number}. Be specific about the food item and provide an accurate calorie estimate based on typical serving size."
                             },
                             {
                                 "type": "image_url",
@@ -611,7 +633,7 @@ class FoodDetector:
                     if isinstance(frame, np.ndarray):
                         if len(frame.shape) == 3:
                             if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
-                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             else:
                                 frame_rgb = frame
                             pil_image = Image.fromarray(frame_rgb)
@@ -623,7 +645,7 @@ class FoodDetector:
                     groq_food, groq_calories = self.query_groq_llm(pil_image)
                     self.last_groq_call = current_time
                     if groq_food:
-                        logging.warning(f"Groq: {groq_food} ({groq_calories} cal)")
+                        logging.warning(f"🤖 Groq LLM Analysis: {groq_food} ({groq_calories} cal)")
                 except Exception as e:
                     logging.error(f"Error preparing frame for Groq: {e}")
         
@@ -741,8 +763,12 @@ class FoodDetector:
                     # Detect food using optimized pipeline (TFLite first, Groq when needed)
                     food, calories = self.detect_food(frame)
                     if food and calories > 0:
-                        self.detected_food = food
-                        self.calories = calories
+                        # Thread-safe update
+                        with self.lock:
+                            self.detected_food = food
+                            self.calories = calories
+                        # Signal new data
+                        self.new_data_event.set()
                         logging.warning(f"Final: {food} - {calories} cal")
                     
                     # Immediate memory cleanup
@@ -752,8 +778,10 @@ class FoodDetector:
                         gc.collect()
                 else:
                     # Mock detection if camera fails
-                    self.detected_food = "apple"
-                    self.calories = 95
+                    with self.lock:
+                        self.detected_food = "apple"
+                        self.calories = 95
+                    self.new_data_event.set()
                 
                 # Periodic memory cleanup for Pi Zero W
                 current_time = time.time()
@@ -809,11 +837,14 @@ def main():
     detection_thread = None
     
     try:
-        # Initialize OLED display
-        disp = OLED_1in51.OLED_1in51()
-        logging.info("Initializing 1.51inch OLED")
-        disp.Init()
-        disp.clear()
+        # Initialize OLED display using Waveshare library
+        if OLED_1in51:
+            logging.info("Initializing 1.51inch OLED (Waveshare)...")
+            disp = OLED_1in51.OLED_1in51()
+            disp.Init()
+            disp.clear()
+        else:
+            logging.error("Waveshare OLED library not loaded")
         
         # Initialize food detector
         detector = FoodDetector()
@@ -833,55 +864,57 @@ def main():
             font_medium = ImageFont.truetype(font_path, 16)
         
         # Main display loop - optimized for Pi Zero W
-        last_update = 0
-        update_interval = detector.config.get('oled_display', {}).get('update_interval', 3.0)  # Less frequent updates
-        
         # Reuse image buffer to reduce memory allocation
         image = Image.new('1', (64, 128), 255)
         last_displayed_food = None
         last_displayed_calories = 0
         
         while True:
-            current_time = time.time()
+            # Wait for new data or timeout (1.0s)
+            # This ensures we update immediately when data is ready (sync fix)
+            # but also refresh occasionally if needed
+            detector.new_data_event.wait(timeout=1.0)
+            detector.new_data_event.clear()
             
-            # Only update display if data changed or interval passed (avoid unnecessary redraws)
-            data_changed = (detector.detected_food != last_displayed_food or 
-                          detector.calories != last_displayed_calories)
+            # Read state safely
+            current_food = None
+            current_calories = 0
+            with detector.lock:
+                current_food = detector.detected_food
+                current_calories = detector.calories
             
-            if current_time - last_update >= update_interval or data_changed:
+            # Only update display if data changed (avoid unnecessary redraws)
+            data_changed = (current_food != last_displayed_food or 
+                          current_calories != last_displayed_calories)
+            
+            if data_changed and disp:
                 # Clear image (reuse buffer)
                 image.paste(255, (0, 0, 64, 128))  # Fill with white
                 
                 # Display calories vertically
-                if detector.detected_food and detector.calories > 0:
+                if current_food and current_calories > 0:
+                    logging.info(f"📺 Displaying: {current_food} - {current_calories} cal")
                     # Food name (vertical, on left side)
-                    food_text = detector.detected_food.upper()[:8]  # Limit length
+                    food_text = current_food.upper()[:8]  # Limit length
                     draw_vertical_text(image, food_text, 5, 10, font_medium, fill=0)
                     
                     # Calories (vertical, on right side) - simplified for performance
-                    cal_text = str(detector.calories)
+                    cal_text = str(current_calories)
                     draw_vertical_text(image, cal_text, 40, 10, font_large, fill=0)
                     draw_vertical_text(image, "CAL", 40, 40, font_medium, fill=0)
                     
-                    last_displayed_food = detector.detected_food
-                    last_displayed_calories = detector.calories
+                    last_displayed_food = current_food
+                    last_displayed_calories = current_calories
                 else:
                     # Waiting for detection
                     status_text = "SCAN"
                     draw_vertical_text(image, status_text, 20, 20, font_medium, fill=0)
                 
-                # Rotate image 180 degrees for proper orientation on OLED
+                # Rotate image 180 degrees for proper orientation on OLED (as per original code)
                 rotated_image = image.rotate(180)
                 
                 # Display on OLED
                 disp.ShowImage(disp.getbuffer(rotated_image))
-                
-                # Clean up rotated image
-                del rotated_image
-                last_update = current_time
-            
-            # Longer sleep for Pi Zero W to reduce CPU usage
-            time.sleep(1.0)  # Increased from 0.5 to 1.0
             
     except IOError as e:
         logging.error(f"IO Error: {e}")
@@ -905,4 +938,4 @@ def main():
         logging.info("Exiting...")
 
 if __name__ == "__main__":
-    main() 
+    main()

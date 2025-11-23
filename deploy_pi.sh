@@ -152,7 +152,8 @@ install_system_deps() {
         zlib1g-dev
         i2c-tools
         fonts-dejavu-core
-        python3-luma.oled
+        python3-rpi.gpio
+        python3-spidev
     )
 
     # Install base in batch for speed
@@ -452,17 +453,15 @@ EOF
     create_startup_script
     create_monitoring_script
     
-    # Ensure luma.oled present if apt package was unavailable
-    print_status "Verifying luma.oled availability..."
-    python3 - << 'PY'
-import importlib, subprocess, sys
-try:
-    importlib.import_module('luma.oled')
-    print("luma.oled present")
-except Exception:
-    print("luma.oled missing; installing via pip (fallback)")
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', 'luma.oled>=3.13.0'], check=False)
-PY
+    # Setup Waveshare OLED library
+    # Setup Waveshare OLED library
+    print_status "Setting up Waveshare OLED library..."
+    if [ -f "setup_waveshare_oled.sh" ]; then
+        chmod +x setup_waveshare_oled.sh
+        ./setup_waveshare_oled.sh
+    else
+        print_warning "setup_waveshare_oled.sh not found. Please ensure Waveshare OLED library is set up manually."
+    fi
     
     echo ""
     print_status "V.A.R.G deployment complete!"
