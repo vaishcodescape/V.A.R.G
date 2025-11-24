@@ -3,6 +3,7 @@ import os
 import json
 from pathlib import Path
 import gc
+import threading
 
 # Add library paths for Waveshare OLED
 
@@ -27,6 +28,7 @@ import threading
 import base64
 import io
 import re
+import concurrent.futures
 
 # Waveshare OLED import
 try:
@@ -153,6 +155,9 @@ class FoodDetector:
         
         # Frame difference detection (only process if scene changed)
         self.last_processed_frame_hash = None
+        
+        # Thread pool for async Groq calls
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         
     def load_config(self, config_path):
         """Load configuration from JSON file"""
@@ -653,38 +658,77 @@ class FoodDetector:
         final_food = None
         final_calories = 0
         
-        if groq_food and groq_calories > 0:
-            # Groq result available - use it
-            final_food = groq_food
-            final_calories = groq_calories
+        # If we have a pending Groq result that just finished, use it
+        # Note: This is handled via the callback updating self.detected_food directly
+        # But for the return value of this function, we prioritize what we have NOW
+        
+        if self.groq_enabled:
+            time_since_groq = current_time - self.last_groq_call
+            if tflite_food and time_since_groq >= self.groq_call_interval:
+                should_call_groq = True
+            elif not tflite_food and time_since_groq >= (self.groq_call_interval * 2):
+                should_call_groq = True
             
-            # Validate with TFLite if available
-            if tflite_food:
-                groq_lower = groq_food.lower()
-                tflite_lower = tflite_food.lower()
-                # Simple similarity check
-                if not (groq_lower in tflite_lower or tflite_lower in groq_lower or
-                       any(w in groq_lower for w in tflite_lower.split())):
-                    # Don't match - if TFLite confidence is high, average the calories
-                    if tflite_confidence > 0.7:
-                        tflite_cal = self.estimate_calories(tflite_food)
-                        final_calories = (groq_calories + tflite_cal) // 2
-        elif tflite_food:
-            # Use TFLite result with estimated calories
+            if should_call_groq:
+                # Convert frame to PIL only when needed (expensive operation)
+                try:
+                    if isinstance(frame, np.ndarray):
+                        if len(frame.shape) == 3:
+                            if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
+                                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            else:
+                                frame_rgb = frame
+                            pil_image = Image.fromarray(frame_rgb)
+                        else:
+                            pil_image = Image.fromarray(frame)
+                    else:
+                        pil_image = frame
+                    
+                    # Submit to thread pool instead of blocking
+                    self.executor.submit(self.process_groq_async, pil_image)
+                    self.last_groq_call = current_time
+                    logging.info("Submitted Groq task to background thread")
+                    
+                except Exception as e:
+                    logging.error(f"Error preparing frame for Groq: {e}")
+
+        # Return TFLite result immediately (or whatever we have cached)
+        if tflite_food:
             final_food = tflite_food
             final_calories = self.estimate_calories(tflite_food)
-        elif groq_food:
-            # Groq detected but no calories
-            final_food = groq_food
-            final_calories = self.estimate_calories(groq_food)
+        elif self.last_result:
+             # If no new TFLite detection, maybe return the last known good result?
+             # For now, let's just return what we found (which might be nothing)
+             pass
         
-        # Cache result
+        # Cache result if we found something new
         if final_food:
             self.last_result = (final_food, final_calories)
             self.last_result_time = current_time
             self.last_processed_frame_hash = frame_hash
         
         return final_food, final_calories
+
+    def process_groq_async(self, image):
+        """Process Groq API call asynchronously"""
+        try:
+            food, calories = self.query_groq_llm(image)
+            if food:
+                logging.warning(f"🤖 Groq LLM Analysis (Async): {food} ({calories} cal)")
+                
+                # Update shared state safely
+                with self.lock:
+                    self.detected_food = food
+                    self.calories = calories
+                
+                # Update cache
+                self.last_result = (food, calories)
+                self.last_result_time = time.time()
+                
+                # Signal new data available
+                self.new_data_event.set()
+        except Exception as e:
+            logging.error(f"Error in async Groq processing: {e}")
     
     def estimate_calories(self, food_name):
         """Estimate calories for detected food"""
@@ -797,6 +841,8 @@ class FoodDetector:
     def stop(self):
         """Stop detection"""
         self.detection_active = False
+        if self.executor:
+            self.executor.shutdown(wait=False)
         if self.camera:
             try:
                 if hasattr(self.camera, 'stop'):
@@ -893,7 +939,7 @@ def main():
                 
                 # Display calories vertically
                 if current_food and current_calories > 0:
-                    logging.info(f"📺 Displaying: {current_food} - {current_calories} cal")
+                    logging.info(f"Displaying: {current_food} - {current_calories} cal")
                     # Food name (vertical, on left side)
                     food_text = current_food.upper()[:8]  # Limit length
                     draw_vertical_text(image, food_text, 5, 10, font_medium, fill=0)
