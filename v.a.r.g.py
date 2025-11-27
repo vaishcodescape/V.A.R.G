@@ -103,7 +103,6 @@ def try_kill_camera_users():
                         "libcamera-hello",
                         "libcamera-vid",
                         "libcamera-still",
-                        "v.a.r.g.py",
                     ]
                 ):
                     parts = line.split()
