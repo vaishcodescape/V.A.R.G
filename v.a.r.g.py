@@ -92,17 +92,16 @@ os.environ['MKL_NUM_THREADS'] = '1'
 TFLITE_AVAILABLE = False
 TFLITE_RUNTIME = False
 
-# Try to import camera and CV libraries
-# For Raspberry Pi Zero W we now use OpenCV directly instead of Picamera2
-cv2 = None  # Initialize cv2 as None, will be set if available
+# Try to import camera library (Picamera2) for native Pi camera support
+CAMERA_AVAILABLE = False
 try:
-    import cv2
+    from picamera2 import Picamera2
     CAMERA_AVAILABLE = True
-    logging.warning("Using OpenCV camera backend (Pi Zero W).")
+    logging.warning("Using Picamera2 backend for Pi camera.")
 except ImportError:
-    cv2 = None
+    Picamera2 = None
     CAMERA_AVAILABLE = False
-    logging.warning("OpenCV not available. Camera will be disabled and mock detection used.")
+    logging.warning("Picamera2 not available. Camera will be disabled and mock detection used.")
 
 # Reduce logging for performance on Pi Zero W
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
@@ -333,119 +332,34 @@ class FoodDetector:
             logging.error(f"Error querying Groq LLM: {e}")
             return None, None
     
-    def load_tflite_model(self):
-        """Load TensorFlow Lite model and labels"""
-        tflite_config = self.config.get('tflite', {})
-        # If runtime is not available or disabled in config, skip quietly
-        if not TFLITE_AVAILABLE or not tflite_config.get('enabled', True):
-            logging.info("TFLite detection disabled in config")
-            return False
-        
-        models_dir = Path('models')
-        if not models_dir.exists():
-            logging.warning("Models directory not found. Run setup_models.py first.")
-            return False
-        
-        # Try to load models in priority order
-        model_priority = tflite_config.get('model_priority', 
-            ['efficientnet_food', 'mobilenet_food_v2', 'food101_mobilenet'])
-        
-        for model_name in model_priority:
-            model_path = models_dir / f"{model_name}.tflite"
-            labels_path = models_dir / f"{model_name}_labels.txt"
-            
-            if model_path.exists():
-                try:
-                    # Load interpreter
-                    self.tflite_interpreter = tflite.Interpreter(model_path=str(model_path))
-                    self.tflite_interpreter.allocate_tensors()
-                    
-                    # Get input and output details (cache for performance)
-                    self.input_details = self.tflite_interpreter.get_input_details()
-                    self.output_details = self.tflite_interpreter.get_output_details()
-                    self.input_index = self.input_details[0]['index']
-                    self.output_index = self.output_details[0]['index']
-                    
-                    # Get input size from model
-                    input_shape = self.input_details[0]['shape']
-                    if len(input_shape) >= 3:
-                        self.model_input_size = (input_shape[1], input_shape[2])
-                    
-                    # Load labels
-                    if labels_path.exists():
-                        with open(labels_path, 'r') as f:
-                            self.tflite_labels = [line.strip() for line in f.readlines()]
-                    else:
-                        logging.warning(f"Labels file not found: {labels_path}")
-                        # Use Food-101 labels as fallback
-                        self.tflite_labels = self._get_food101_labels()
-                    
-                    logging.info(f"Loaded TFLite model: {model_name}")
-                    logging.info(f"Input size: {self.model_input_size}")
-                    logging.info(f"Labels count: {len(self.tflite_labels)}")
-                    return True
-                    
-                except Exception as e:
-                    logging.error(f"Failed to load model {model_name}: {e}")
-                    continue
-        
-        logging.warning("No TFLite models found or loaded")
-        return False
-    
-    def _get_food101_labels(self):
-        """Get Food-101 labels as fallback"""
-        return [
-            "apple_pie", "baby_back_ribs", "baklava", "beef_carpaccio", "beef_tartare",
-            "beet_salad", "beignets", "bibimbap", "bread_pudding", "breakfast_burrito",
-            "bruschetta", "caesar_salad", "cannoli", "caprese_salad", "carrot_cake",
-            "ceviche", "cheese_plate", "cheesecake", "chicken_curry", "chicken_quesadilla",
-            "chicken_wings", "chocolate_cake", "chocolate_mousse", "churros", "clam_chowder",
-            "club_sandwich", "crab_cakes", "creme_brulee", "croque_madame", "cup_cakes",
-            "deviled_eggs", "donuts", "dumplings", "edamame", "eggs_benedict",
-            "escargots", "falafel", "filet_mignon", "fish_and_chips", "foie_gras",
-            "french_fries", "french_onion_soup", "french_toast", "fried_calamari", "fried_rice",
-            "frozen_yogurt", "garlic_bread", "gnocchi", "greek_salad", "grilled_cheese_sandwich",
-            "grilled_salmon", "guacamole", "gyoza", "hamburger", "hot_and_sour_soup",
-            "hot_dog", "huevos_rancheros", "hummus", "ice_cream", "lasagna",
-            "lobster_bisque", "lobster_roll_sandwich", "macaroni_and_cheese", "macarons", "miso_soup",
-            "mussels", "nachos", "omelette", "onion_rings", "oysters",
-            "pad_thai", "paella", "pancakes", "panna_cotta", "peking_duck",
-            "pho", "pizza", "pork_chop", "poutine", "prime_rib",
-            "pulled_pork_sandwich", "ramen", "ravioli", "red_velvet_cake", "risotto",
-            "samosa", "sashimi", "scallops", "seaweed_salad", "shrimp_and_grits",
-            "spaghetti_bolognese", "spaghetti_carbonara", "spring_rolls", "steak", "strawberry_shortcake",
-            "sushi", "tacos", "takoyaki", "tiramisu", "tuna_tartare",
-            "waffles"
-        ]
-    
     def init_camera(self):
-        """Initialize camera with optimized OpenCV settings for Pi Zero W.
-        
-        We now use OpenCV directly instead of Picamera2 to avoid libcamera
-        pipeline conflicts and simplify deployment on Pi Zero W.
-        """
-        if not CAMERA_AVAILABLE:
+        """Initialize camera with Picamera2 for Pi Zero W."""
+        if not CAMERA_AVAILABLE or Picamera2 is None:
             return False
         
         # Use smaller resolution for Pi Zero W
-        cam_width = self.config.get('camera_width', 224)
-        cam_height = self.config.get('camera_height', 224)
+        cam_width = int(self.config.get('camera_width', 224))
+        cam_height = int(self.config.get('camera_height', 224))
 
-        # OpenCV backend (works on Pi Zero W; may use more CPU but avoids libcamera pipeline issues)
         try:
-            self.camera = cv2.VideoCapture(self.config.get('camera_index', 0))
-            # Set lower resolution and frame rate for Pi Zero W
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, cam_width)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_height)
-            self.camera.set(cv2.CAP_PROP_FPS, 5)  # Very low FPS for Pi Zero W
-            if self.camera.isOpened():
-                logging.warning("Camera initialized (OpenCV backend) on Pi Zero W")
-                return True
-        except Exception as e2:
-            logging.error(f"Failed to initialize camera via OpenCV: {e2}")
+            self.camera = Picamera2()
+            config = self.camera.create_preview_configuration(
+                main={"size": (cam_width, cam_height)},
+                buffer_count=1,  # Reduce buffer for memory
+            )
+            self.camera.configure(config)
+            self.camera.start()
+            logging.warning("Camera initialized (Picamera2 backend) on Pi Zero W")
+            return True
+        except Exception as e:
+            logging.error(
+                "Picamera2 failed to start (error: %s). This usually means the camera "
+                "pipeline is already in use by another process (another v.a.r.g.py, "
+                "libcamera-hello, a desktop camera app, etc.).",
+                e,
+            )
+            self.camera = None
             return False
-        
-        return False
     
     def capture_frame(self):
         """Capture a frame from camera"""
@@ -453,120 +367,23 @@ class FoodDetector:
             return None
             
         try:
-            # OpenCV capture
-            ret, frame = self.camera.read()
-            if ret:
+            if hasattr(self.camera, "capture_array"):
+                # Picamera2
+                frame = self.camera.capture_array()
                 return frame
         except Exception as e:
             logging.error(f"Error capturing frame: {e}")
         return None
-    
-    def preprocess_frame(self, frame):
-        """Preprocess frame for TFLite model input - optimized for Pi Zero W"""
-        try:
-            # Optimize: if frame is already close to model size, skip resize
-            if isinstance(frame, np.ndarray):
-                # Handle different color formats
-                if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    # Convert BGR to RGB if needed (more efficient than PIL conversion)
-                    try:
-                        if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        else:
-                            frame_rgb = frame
-                    except Exception:
-                        frame_rgb = frame
-                else:
-                    frame_rgb = frame
-                
-                # Use cv2 resize if available (faster than PIL)
-                if cv2 is not None and hasattr(cv2, 'resize') and frame_rgb.shape[:2] != self.model_input_size:
-                    frame_rgb = cv2.resize(frame_rgb, self.model_input_size, 
-                                           interpolation=cv2.INTER_LINEAR)
-                    pil_image = Image.fromarray(frame_rgb)
-                else:
-                    pil_image = Image.fromarray(frame_rgb)
-                    if pil_image.size != self.model_input_size:
-                        # Use NEAREST for speed on Pi Zero W (lower quality but faster)
-                        pil_image = pil_image.resize(self.model_input_size, Image.Resampling.NEAREST)
-            else:
-                pil_image = frame
-                if pil_image.size != self.model_input_size:
-                    pil_image = pil_image.resize(self.model_input_size, Image.Resampling.NEAREST)
-            
-            # Convert to numpy array - use uint8 first, then convert to float
-            # This is more memory efficient
-            img_array = np.array(pil_image, dtype=np.uint8)
-            
-            # Normalize in-place to save memory
-            img_array = img_array.astype(np.float32) / 255.0
-            
-            # Add batch dimension
-            img_array = np.expand_dims(img_array, axis=0)
-            
-            return img_array
-            
-        except Exception as e:
-            logging.error(f"Error preprocessing frame: {e}")
-            return None
-    
-    def detect_food_tflite(self, frame):
-        """Detect food using TFLite model - optimized for Pi Zero W"""
-        if frame is None or self.tflite_interpreter is None:
-            return None, 0.0
-        
-        try:
-            # Preprocess frame
-            input_data = self.preprocess_frame(frame)
-            if input_data is None:
-                return None, 0.0
-            
-            # Use cached tensor indices for performance
-            # Set input tensor
-            self.tflite_interpreter.set_tensor(self.input_index, input_data)
-            
-            # Run inference
-            self.tflite_interpreter.invoke()
-            
-            # Get output (reuse output_details)
-            output_data = self.tflite_interpreter.get_tensor(self.output_index)
-            predictions = output_data[0]  # Remove batch dimension
-            
-            # Get top prediction (use argmax directly - more efficient)
-            confidence_threshold = self.config.get('tflite', {}).get('confidence_threshold', 0.35)
-            top_idx = int(np.argmax(predictions))
-            confidence = float(predictions[top_idx])
-            
-            if confidence >= confidence_threshold and top_idx < len(self.tflite_labels):
-                food_name = self.tflite_labels[top_idx]
-                # Clean up food name (remove underscores, format nicely)
-                food_name = food_name.replace('_', ' ').title()
-                return food_name, confidence
-            else:
-                return None, confidence
-                
-        except Exception as e:
-            logging.error(f"Error in TFLite detection: {e}")
-            return None, 0.0
-        finally:
-            # Memory cleanup
-            if 'input_data' in locals():
-                del input_data
-            gc.collect()
     
     def frame_hash(self, frame):
         """Quick hash of frame to detect changes (optimized for Pi Zero W)"""
         try:
             # Use downsampled frame for hash (much faster)
             if isinstance(frame, np.ndarray):
-                # Downsample to 32x32 for hash
-                if cv2 is not None and hasattr(cv2, 'resize'):
-                    small = cv2.resize(frame, (32, 32), interpolation=cv2.INTER_NEAREST)
-                else:
-                    # Fallback: simple downsampling without cv2
-                    h, w = frame.shape[:2]
-                    step_h, step_w = max(1, h // 32), max(1, w // 32)
-                    small = frame[::step_h, ::step_w]
+                # Simple numpy downsampling to ~32x32 for hash
+                h, w = frame.shape[:2]
+                step_h, step_w = max(1, h // 32), max(1, w // 32)
+                small = frame[::step_h, ::step_w]
                 return hash(small.tobytes())
             return hash(str(frame))
         except Exception:
@@ -604,14 +421,7 @@ class FoodDetector:
                 # Convert frame to PIL only when needed (expensive operation)
                 try:
                     if isinstance(frame, np.ndarray):
-                        if len(frame.shape) == 3:
-                            if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
-                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            else:
-                                frame_rgb = frame
-                            pil_image = Image.fromarray(frame_rgb)
-                        else:
-                            pil_image = Image.fromarray(frame)
+                        pil_image = Image.fromarray(frame)
                     else:
                         pil_image = frame
                     
@@ -770,10 +580,12 @@ class FoodDetector:
         if self.executor:
             self.executor.shutdown(wait=False)
         if self.camera:
-            # OpenCV VideoCapture cleanup
+            # Picamera2 cleanup
             try:
-                if hasattr(self.camera, "release"):
-                    self.camera.release()
+                if hasattr(self.camera, "stop"):
+                    self.camera.stop()
+                if hasattr(self.camera, "close"):
+                    self.camera.close()
             except Exception:
                 pass
 
