@@ -459,6 +459,16 @@ class FoodDetector:
                 logging.warning("Camera initialized (Picamera2) - OPTIMAL for Pi Zero W")
                 return True
             except Exception as e:
+                msg = str(e)
+                # Common case: libcamera pipeline already in use by another process
+                if "in use by another process" in msg:
+                    logging.error(
+                        "Picamera2 could not start because the camera pipeline is already in use.\n"
+                        "Make sure no other process (another v.a.r.g.py, libcamera-hello, etc.) "
+                        "is using the camera, then run this script again."
+                    )
+                    # In this specific case, OpenCV will also fail, so skip fallback
+                    return False
                 logging.warning(f"Picamera2 failed: {e}. Trying OpenCV fallback...")
         
         # Fallback to OpenCV (works but not optimal for Pi Zero W)
@@ -867,10 +877,23 @@ class FoodDetector:
             self.executor.shutdown(wait=False)
         if self.camera:
             try:
-                if hasattr(self.camera, 'stop'):
-                    self.camera.stop()
-                else:
-                    self.camera.release()
+                # For Picamera2, call stop() then close() to fully release libcamera pipeline
+                if hasattr(self.camera, "stop"):
+                    try:
+                        self.camera.stop()
+                    except Exception:
+                        pass
+                if hasattr(self.camera, "close"):
+                    try:
+                        self.camera.close()
+                    except Exception:
+                        pass
+                elif hasattr(self.camera, "release"):
+                    # OpenCV VideoCapture
+                    try:
+                        self.camera.release()
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -898,6 +921,25 @@ def draw_vertical_text(image, text, x, y, font, fill=0):
             image.paste(cropped, (x, paste_y))
     except Exception:
         pass  # Fail silently to avoid display errors
+
+
+def draw_centered_text(image, text, font, fill=0):
+    """
+    Draw horizontal text centered on the given image.
+    Centers both horizontally and vertically.
+    """
+    try:
+        draw = ImageDraw.Draw(image)
+        # textbbox gives accurate metrics on Pillow 8+
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        x = (image.width - text_width) // 2
+        y = (image.height - text_height) // 2
+        draw.text((x, y), text, font=font, fill=fill)
+    except Exception:
+        # Fail silently to avoid crashing the display loop
+        pass
 
 def main():
     disp = None
@@ -946,6 +988,13 @@ def main():
         image = Image.new('1', (64, 128), 255)
         last_displayed_food = None
         last_displayed_calories = 0
+
+        # Initial splash screen: show "V.A.R.G" centered on the OLED
+        if disp:
+            image.paste(255, (0, 0, 64, 128))  # Clear to white
+            draw_centered_text(image, "V.A.R.G", font_large, fill=0)
+            rotated_image = image.rotate(180)
+            disp.ShowImage(disp.getbuffer(rotated_image))
         
         while True:
             # Wait for new data or timeout (1.0s)
