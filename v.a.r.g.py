@@ -88,20 +88,9 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 
-# Try to import TensorFlow Lite (prefer tflite_runtime for Pi Zero W)
-try:
-    import tflite_runtime.interpreter as tflite
-    TFLITE_AVAILABLE = True
-    TFLITE_RUNTIME = True
-except ImportError:
-    try:
-        import tensorflow.lite as tflite
-        TFLITE_AVAILABLE = True
-        TFLITE_RUNTIME = False
-    except ImportError:
-        TFLITE_AVAILABLE = False
-        TFLITE_RUNTIME = False
-        logging.warning("TensorFlow Lite not available. Food detection will be limited.")
+# TensorFlow Lite support has been removed in this build to simplify deployment
+TFLITE_AVAILABLE = False
+TFLITE_RUNTIME = False
 
 # Try to import camera and CV libraries
 # For Raspberry Pi Zero W we now use OpenCV directly instead of Picamera2
@@ -584,7 +573,7 @@ class FoodDetector:
             return None
     
     def detect_food(self, frame):
-        """Main food detection: Optimized for Pi Zero W - TFLite first, Groq only when needed"""
+        """Main food detection: uses Groq LLM (when enabled) with caching, no TensorFlow Lite."""
         if frame is None:
             return None, 0
         
@@ -595,84 +584,29 @@ class FoodDetector:
         
         # Check if frame changed significantly (skip processing if same)
         frame_hash = self.frame_hash(frame)
-        if frame_hash == self.last_processed_frame_hash:
-            # Return cached result if available
-            current_time = time.time()
-            if (self.last_result and 
-                current_time - self.last_result_time < self.result_cache_duration):
-                return self.last_result
-        
-        # Step 1: Use TFLite FIRST (fast, local) - only call Groq if TFLite finds food
-        tflite_food = None
-        tflite_confidence = 0.0
-        
-        if self.tflite_interpreter is not None:
-            tflite_food, tflite_confidence = self.detect_food_tflite(frame)
-            if tflite_food:
-                logging.warning(f"TFLite: {tflite_food} (conf: {tflite_confidence:.2f})")
-        
-        # Step 2: Only call Groq if:
-        # - TFLite detected food (to get accurate calories)
-        # - AND enough time has passed since last Groq call
-        # - OR TFLite didn't detect anything but we haven't called Groq in a while
-        groq_food = None
-        groq_calories = 0
         current_time = time.time()
-        should_call_groq = False
-        
-        if self.groq_enabled:
-            time_since_groq = current_time - self.last_groq_call
-            if tflite_food and time_since_groq >= self.groq_call_interval:
-                # TFLite found food, get accurate calories from Groq
-                should_call_groq = True
-            elif not tflite_food and time_since_groq >= (self.groq_call_interval * 2):
-                # No TFLite detection, but check with Groq occasionally
-                should_call_groq = True
-            
-            if should_call_groq:
-                # Convert frame to PIL only when needed (expensive operation)
-                try:
-                    if isinstance(frame, np.ndarray):
-                        if len(frame.shape) == 3:
-                            if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
-                                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            else:
-                                frame_rgb = frame
-                            pil_image = Image.fromarray(frame_rgb)
-                        else:
-                            pil_image = Image.fromarray(frame)
-                    else:
-                        pil_image = frame
-                    
-                    groq_food, groq_calories = self.query_groq_llm(pil_image)
-                    self.last_groq_call = current_time
-                    if groq_food:
-                        logging.warning(f"🤖 Groq LLM Analysis: {groq_food} ({groq_calories} cal)")
-                except Exception as e:
-                    logging.error(f"Error preparing frame for Groq: {e}")
-        
-        # Step 3: Combine results intelligently
+        if (
+            frame_hash == self.last_processed_frame_hash
+            and self.last_result
+            and current_time - self.last_result_time < self.result_cache_duration
+        ):
+            return self.last_result
+
         final_food = None
         final_calories = 0
-        
-        # If we have a pending Groq result that just finished, use it
-        # Note: This is handled via the callback updating self.detected_food directly
-        # But for the return value of this function, we prioritize what we have NOW
-        
+
+        # Use Groq LLM for detection if enabled
         if self.groq_enabled:
             time_since_groq = current_time - self.last_groq_call
-            if tflite_food and time_since_groq >= self.groq_call_interval:
-                should_call_groq = True
-            elif not tflite_food and time_since_groq >= (self.groq_call_interval * 2):
-                should_call_groq = True
-            
+            should_call_groq = time_since_groq >= self.groq_call_interval
+
             if should_call_groq:
                 # Convert frame to PIL only when needed (expensive operation)
                 try:
                     if isinstance(frame, np.ndarray):
                         if len(frame.shape) == 3:
                             if cv2 is not None and hasattr(cv2, 'COLOR_BGR2RGB'):
-                                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             else:
                                 frame_rgb = frame
                             pil_image = Image.fromarray(frame_rgb)
@@ -685,26 +619,22 @@ class FoodDetector:
                     self.executor.submit(self.process_groq_async, pil_image)
                     self.last_groq_call = current_time
                     logging.info("Submitted Groq task to background thread")
-                    
                 except Exception as e:
                     logging.error(f"Error preparing frame for Groq: {e}")
 
-        # Return TFLite result immediately (or whatever we have cached)
-        if tflite_food:
-            final_food = tflite_food
-            final_calories = self.estimate_calories(tflite_food)
-        elif self.last_result:
-             # If no new TFLite detection, maybe return the last known good result?
-             # For now, let's just return what we found (which might be nothing)
-             pass
-        
-        # Cache result if we found something new
+            # If async worker has already produced a result, use it
+            if (
+                self.last_result
+                and current_time - self.last_result_time < self.result_cache_duration
+            ):
+                final_food, final_calories = self.last_result
+
+        # Cache frame hash if we have a valid detection
         if final_food:
-            self.last_result = (final_food, final_calories)
-            self.last_result_time = current_time
             self.last_processed_frame_hash = frame_hash
-        
-        return final_food, final_calories
+            return final_food, final_calories
+
+        return None, 0
 
     def process_groq_async(self, image):
         """Process Groq API call asynchronously"""
@@ -769,12 +699,8 @@ class FoodDetector:
     
     def run_detection_loop(self):
         """Main detection loop - optimized for Pi Zero W"""
-        # Load TFLite model first (only if runtime is available and enabled)
-        if TFLITE_AVAILABLE and self.config.get("tflite", {}).get("enabled", True):
-            if not self.load_tflite_model():
-                logging.warning("TFLite model not loaded. Detection will be limited.")
-        else:
-            logging.info("TFLite runtime not available or disabled; using non-TFLite detection only.")
+        # TensorFlow Lite support has been removed; we rely on Groq LLM (when enabled)
+        # and heuristic calorie estimation instead.
         
         if not self.init_camera():
             logging.warning("Camera not available. Using mock detection.")
