@@ -61,6 +61,70 @@ def try_release_gpio_pins(pins):
             # Ignore if sysfs interface is not available or pin not exported
             pass
 
+
+def try_kill_camera_users():
+    """
+    Best-effort attempt to terminate other processes that are actively using
+    the Pi camera (libcamera pipeline or /dev/video* devices).
+    This is optional and may require root for some processes.
+    """
+    try:
+        import subprocess
+
+        # Kill any processes using /dev/video0-3
+        for idx in range(4):
+            dev = f"/dev/video{idx}"
+            if not os.path.exists(dev):
+                continue
+            try:
+                # fuser -k sends SIGKILL to processes using the device
+                subprocess.run(
+                    ["fuser", "-k", dev],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                # Ignore if fuser is not available or we lack permissions
+                continue
+
+        # Also look for common libcamera helper binaries and kill them
+        try:
+            ps = subprocess.run(
+                ["ps", "aux"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            for line in ps.stdout.splitlines():
+                if any(
+                    name in line
+                    for name in [
+                        "libcamera-hello",
+                        "libcamera-vid",
+                        "libcamera-still",
+                        "v.a.r.g.py",
+                    ]
+                ):
+                    parts = line.split()
+                    if len(parts) > 1:
+                        pid = parts[1]
+                        # Avoid killing our own process
+                        if pid != str(os.getpid()):
+                            try:
+                                subprocess.run(
+                                    ["kill", "-9", pid],
+                                    check=False,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                            except Exception:
+                                continue
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 # Waveshare OLED import
 try:
     from waveshare_OLED import OLED_1in51
@@ -352,14 +416,34 @@ class FoodDetector:
             logging.warning("Camera initialized (Picamera2 backend) on Pi Zero W")
             return True
         except Exception as e:
+            # First failure: try to free camera users and retry once
+            msg = str(e)
             logging.error(
-                "Picamera2 failed to start (error: %s). This usually means the camera "
-                "pipeline is already in use by another process (another v.a.r.g.py, "
-                "libcamera-hello, a desktop camera app, etc.).",
-                e,
+                "Picamera2 failed to start (error: %s). Attempting to free camera users and retry...",
+                msg,
             )
             self.camera = None
-            return False
+            try_kill_camera_users()
+            time.sleep(1.0)
+            try:
+                self.camera = Picamera2()
+                config = self.camera.create_preview_configuration(
+                    main={"size": (cam_width, cam_height)},
+                    buffer_count=1,
+                )
+                self.camera.configure(config)
+                self.camera.start()
+                logging.warning("Camera initialized on retry after freeing camera users.")
+                return True
+            except Exception as e2:
+                logging.error(
+                    "Picamera2 failed to start after retry (error: %s). "
+                    "This usually means the camera pipeline is still in use by another "
+                    "process (another v.a.r.g.py, libcamera-hello, a desktop camera app, etc.).",
+                    e2,
+                )
+                self.camera = None
+                return False
     
     def capture_frame(self):
         """Capture a frame from camera"""
