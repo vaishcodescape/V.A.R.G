@@ -14,8 +14,10 @@ import concurrent.futures
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
-# Add library paths for Waveshare OLED
+# Configure GPIOZero to use RPi.GPIO backend by default (avoids some lgpio 'GPIO busy' issues)
+os.environ.setdefault("GPIOZERO_PIN_FACTORY", "rpigpio")
 
+# Add library paths for Waveshare OLED
 current_dir = os.path.dirname(os.path.realpath(__file__))
 libdir = os.path.join(current_dir, 'Raspberry', 'python', 'lib')
 if os.path.exists(libdir):
@@ -29,6 +31,21 @@ else:
 picdir = os.path.join(current_dir, 'pic')
 if not os.path.exists(picdir):
     picdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
+
+
+def try_release_gpio_pins(pins):
+    """
+    Best-effort attempt to free GPIO pins that might be left busy by previous runs.
+    This is mainly to reduce 'GPIO busy' errors from gpiozero/lgpio when re-running the script.
+    """
+    # Legacy sysfs unexport (no-op on newer kernels, but harmless)
+    for pin in pins:
+        try:
+            with open("/sys/class/gpio/unexport", "w") as f:
+                f.write(str(pin))
+        except Exception:
+            # Ignore if sysfs interface is not available or pin not exported
+            pass
 
 # Waveshare OLED import
 try:
@@ -888,12 +905,22 @@ def main():
     detection_thread = None
     
     try:
+        # Try to release GPIO pins that the OLED typically uses (e.g., RST on GPIO27)
+        # This helps if a previous process left them exported/busy.
+        try_release_gpio_pins([27, 25, 8, 10, 11])
+
         # Initialize OLED display using Waveshare library
         if OLED_1in51:
             logging.info("Initializing 1.51inch OLED (Waveshare)...")
-            disp = OLED_1in51.OLED_1in51()
-            disp.Init()
-            disp.clear()
+            try:
+                disp = OLED_1in51.OLED_1in51()
+                disp.Init()
+                disp.clear()
+            except Exception as e:
+                # Handle GPIO or wiring issues gracefully instead of crashing
+                logging.error(f"Failed to initialize Waveshare OLED display: {e}")
+                traceback.print_exc()
+                disp = None
         else:
             logging.error("Waveshare OLED library not loaded")
         
