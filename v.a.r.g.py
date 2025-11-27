@@ -4,6 +4,15 @@ import json
 from pathlib import Path
 import gc
 import threading
+import logging
+import time
+import traceback
+import base64
+import io
+import re
+import concurrent.futures
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 # Add library paths for Waveshare OLED
 
@@ -21,24 +30,12 @@ picdir = os.path.join(current_dir, 'pic')
 if not os.path.exists(picdir):
     picdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
 
-import logging
-import time
-import traceback
-import threading
-import base64
-import io
-import re
-import concurrent.futures
-
 # Waveshare OLED import
 try:
     from waveshare_OLED import OLED_1in51
 except ImportError:
     logging.warning("waveshare_OLED library not found. Display will not work.")
     OLED_1in51 = None
-
-from PIL import Image, ImageDraw, ImageFont
-import numpy as np
 
 # Try to import requests for Groq API
 try:
@@ -244,9 +241,17 @@ class FoodDetector:
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {self.groq_api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
-            
+
+            # Build prompt text separately to avoid complex escaping
+            prompt_text = (
+                "Analyze this food image. Identify the food item(s) and estimate the total calories. "
+                "Respond in JSON format: "
+                '{"food": "food name", "calories": number}. '
+                "Be specific about the food item and provide an accurate calorie estimate based on typical serving size."
+            )
+
             # Use vision model for image analysis
             payload = {
                 "model": self.groq_model,
@@ -256,19 +261,19 @@ class FoodDetector:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Analyze this food image. Identify the food item(s) and estimate the total calories. Respond in JSON format: {\\"food\\": \\"food name\\", \\"calories\\": number}. Be specific about the food item and provide an accurate calorie estimate based on typical serving size."
+                                "text": prompt_text,
                             },
                             {
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/jpeg;base64,{img_base64}"
-                                }
-                            }
-                        ]
+                                },
+                            },
+                        ],
                     }
                 ],
                 "max_tokens": 150,
-                "temperature": 0.3
+                "temperature": 0.3,
             }
             
             # Make API request with shorter timeout for Pi Zero W (faster failure)
