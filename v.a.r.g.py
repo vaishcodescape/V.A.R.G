@@ -104,23 +104,16 @@ except ImportError:
         logging.warning("TensorFlow Lite not available. Food detection will be limited.")
 
 # Try to import camera and CV libraries
-# NOTE: For Raspberry Pi Zero W, Picamera2 is MUCH more efficient than OpenCV
-# OpenCV works but is resource-heavy. Picamera2 is the recommended choice.
+# For Raspberry Pi Zero W we now use OpenCV directly instead of Picamera2
 cv2 = None  # Initialize cv2 as None, will be set if available
 try:
-    from picamera2 import Picamera2
-    PICAMERA2_AVAILABLE = True
+    import cv2
     CAMERA_AVAILABLE = True
+    logging.warning("Using OpenCV camera backend (Pi Zero W).")
 except ImportError:
-    PICAMERA2_AVAILABLE = False
-    try:
-        import cv2
-        CAMERA_AVAILABLE = True
-        logging.warning("Picamera2 not available. Using OpenCV (slower on Pi Zero W)")
-    except ImportError:
-        cv2 = None
-        CAMERA_AVAILABLE = False
-        logging.warning("Camera libraries not available. Using mock detection.")
+    cv2 = None
+    CAMERA_AVAILABLE = False
+    logging.warning("OpenCV not available. Camera will be disabled and mock detection used.")
 
 # Reduce logging for performance on Pi Zero W
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
@@ -437,17 +430,10 @@ class FoodDetector:
         ]
     
     def init_camera(self):
-        """Initialize camera with optimized settings for Pi Zero W
+        """Initialize camera with optimized OpenCV settings for Pi Zero W.
         
-        Priority:
-        1. Picamera2 (BEST for Pi Zero W - native, efficient, hardware-accelerated)
-        2. OpenCV (FALLBACK - works but slower and more resource-intensive)
-        
-        OpenCV on Pi Zero W:
-        - Will work but uses more CPU and memory
-        - Slower frame rates
-        - Higher latency
-        - Not recommended for production use on Pi Zero W
+        We now use OpenCV directly instead of Picamera2 to avoid libcamera
+        pipeline conflicts and simplify deployment on Pi Zero W.
         """
         if not CAMERA_AVAILABLE:
             return False
@@ -455,42 +441,16 @@ class FoodDetector:
         # Use smaller resolution for Pi Zero W
         cam_width = self.config.get('camera_width', 224)
         cam_height = self.config.get('camera_height', 224)
-            
-        # Try Picamera2 first (RECOMMENDED for Pi Zero W)
-        if PICAMERA2_AVAILABLE:
-            try:
-                self.camera = Picamera2()
-                # Use lower quality mode for Pi Zero W
-                config = self.camera.create_preview_configuration(
-                    main={"size": (cam_width, cam_height)},
-                    buffer_count=1  # Reduce buffer for memory
-                )
-                self.camera.configure(config)
-                self.camera.start()
-                logging.warning("Camera initialized (Picamera2) - OPTIMAL for Pi Zero W")
-                return True
-            except Exception as e:
-                logging.error(
-                    "Picamera2 failed to start (error: %s). "
-                    "Most often this means the camera pipeline is already in use by another process "
-                    "(another v.a.r.g.py, libcamera-hello, a camera service, etc.).\n"
-                    "Stop other camera processes and run this script again.",
-                    e,
-                )
-                # When Picamera2 is available but cannot start, OpenCV will also fail on Pi cameras
-                # and just spam extra warnings, so we skip the OpenCV fallback in this case.
-                return False
 
-        # Fallback to OpenCV (works but not optimal for Pi Zero W, mainly for USB cameras)
+        # OpenCV backend (works on Pi Zero W; may use more CPU but avoids libcamera pipeline issues)
         try:
-            import cv2
             self.camera = cv2.VideoCapture(self.config.get('camera_index', 0))
             # Set lower resolution and frame rate for Pi Zero W
             self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, cam_width)
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_height)
             self.camera.set(cv2.CAP_PROP_FPS, 5)  # Very low FPS for Pi Zero W
             if self.camera.isOpened():
-                logging.warning("Camera initialized (OpenCV) - FALLBACK mode (slower on Pi Zero W)")
+                logging.warning("Camera initialized (OpenCV backend) on Pi Zero W")
                 return True
         except Exception as e2:
             logging.error(f"Failed to initialize camera via OpenCV: {e2}")
@@ -504,15 +464,10 @@ class FoodDetector:
             return None
             
         try:
-            if hasattr(self.camera, 'capture_array'):
-                # Picamera2
-                frame = self.camera.capture_array()
+            # OpenCV capture
+            ret, frame = self.camera.read()
+            if ret:
                 return frame
-            else:
-                # OpenCV
-                ret, frame = self.camera.read()
-                if ret:
-                    return frame
         except Exception as e:
             logging.error(f"Error capturing frame: {e}")
         return None
@@ -889,24 +844,10 @@ class FoodDetector:
         if self.executor:
             self.executor.shutdown(wait=False)
         if self.camera:
+            # OpenCV VideoCapture cleanup
             try:
-                # For Picamera2, call stop() then close() to fully release libcamera pipeline
-                if hasattr(self.camera, "stop"):
-                    try:
-                        self.camera.stop()
-                    except Exception:
-                        pass
-                if hasattr(self.camera, "close"):
-                    try:
-                        self.camera.close()
-                    except Exception:
-                        pass
-                elif hasattr(self.camera, "release"):
-                    # OpenCV VideoCapture
-                    try:
-                        self.camera.release()
-                    except Exception:
-                        pass
+                if hasattr(self.camera, "release"):
+                    self.camera.release()
             except Exception:
                 pass
 
