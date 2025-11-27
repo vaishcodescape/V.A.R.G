@@ -19,18 +19,32 @@ os.environ.setdefault("GPIOZERO_PIN_FACTORY", "rpigpio")
 
 # Add library paths for Waveshare OLED
 current_dir = os.path.dirname(os.path.realpath(__file__))
-libdir = os.path.join(current_dir, 'Raspberry', 'python', 'lib')
-if os.path.exists(libdir):
-    sys.path.append(libdir)
-else:
-    # Fallback to original logic if directory structure is different
-    libdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'lib')
-    if os.path.exists(libdir):
+
+# Support both 'RaspberryPi' and 'Raspberry' layouts for the Waveshare lib
+lib_candidates = [
+    os.path.join(current_dir, 'RaspberryPi', 'python', 'lib'),
+    os.path.join(current_dir, 'Raspberry', 'python', 'lib'),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'lib'),
+]
+for libdir in lib_candidates:
+    if os.path.exists(libdir) and libdir not in sys.path:
         sys.path.append(libdir)
 
-picdir = os.path.join(current_dir, 'pic')
-if not os.path.exists(picdir):
-    picdir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic')
+# Picture/font directory candidates (for Font.ttc, bitmaps, etc.)
+pic_candidates = [
+    os.path.join(current_dir, 'RaspberryPi', 'python', 'pic'),
+    os.path.join(current_dir, 'Raspberry', 'python', 'pic'),
+    os.path.join(current_dir, 'pic'),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'pic'),
+]
+picdir = None
+for candidate in pic_candidates:
+    if os.path.exists(candidate):
+        picdir = candidate
+        break
+if picdir is None:
+    # Fallback to current directory to avoid crashing; fonts may not be found
+    picdir = current_dir
 
 
 def try_release_gpio_pins(pins):
@@ -339,12 +353,9 @@ class FoodDetector:
     
     def load_tflite_model(self):
         """Load TensorFlow Lite model and labels"""
-        if not TFLITE_AVAILABLE:
-            logging.warning("TensorFlow Lite not available")
-            return False
-        
         tflite_config = self.config.get('tflite', {})
-        if not tflite_config.get('enabled', True):
+        # If runtime is not available or disabled in config, skip quietly
+        if not TFLITE_AVAILABLE or not tflite_config.get('enabled', True):
             logging.info("TFLite detection disabled in config")
             return False
         
@@ -459,19 +470,18 @@ class FoodDetector:
                 logging.warning("Camera initialized (Picamera2) - OPTIMAL for Pi Zero W")
                 return True
             except Exception as e:
-                msg = str(e)
-                # Common case: libcamera pipeline already in use by another process
-                if "in use by another process" in msg:
-                    logging.error(
-                        "Picamera2 could not start because the camera pipeline is already in use.\n"
-                        "Make sure no other process (another v.a.r.g.py, libcamera-hello, etc.) "
-                        "is using the camera, then run this script again."
-                    )
-                    # In this specific case, OpenCV will also fail, so skip fallback
-                    return False
-                logging.warning(f"Picamera2 failed: {e}. Trying OpenCV fallback...")
-        
-        # Fallback to OpenCV (works but not optimal for Pi Zero W)
+                logging.error(
+                    "Picamera2 failed to start (error: %s). "
+                    "Most often this means the camera pipeline is already in use by another process "
+                    "(another v.a.r.g.py, libcamera-hello, a camera service, etc.).\n"
+                    "Stop other camera processes and run this script again.",
+                    e,
+                )
+                # When Picamera2 is available but cannot start, OpenCV will also fail on Pi cameras
+                # and just spam extra warnings, so we skip the OpenCV fallback in this case.
+                return False
+
+        # Fallback to OpenCV (works but not optimal for Pi Zero W, mainly for USB cameras)
         try:
             import cv2
             self.camera = cv2.VideoCapture(self.config.get('camera_index', 0))
@@ -483,7 +493,7 @@ class FoodDetector:
                 logging.warning("Camera initialized (OpenCV) - FALLBACK mode (slower on Pi Zero W)")
                 return True
         except Exception as e2:
-            logging.error(f"Failed to initialize camera: {e2}")
+            logging.error(f"Failed to initialize camera via OpenCV: {e2}")
             return False
         
         return False
@@ -804,9 +814,12 @@ class FoodDetector:
     
     def run_detection_loop(self):
         """Main detection loop - optimized for Pi Zero W"""
-        # Load TFLite model first
-        if not self.load_tflite_model():
-            logging.warning("TFLite model not loaded. Detection will be limited.")
+        # Load TFLite model first (only if runtime is available and enabled)
+        if TFLITE_AVAILABLE and self.config.get("tflite", {}).get("enabled", True):
+            if not self.load_tflite_model():
+                logging.warning("TFLite model not loaded. Detection will be limited.")
+        else:
+            logging.info("TFLite runtime not available or disabled; using non-TFLite detection only.")
         
         if not self.init_camera():
             logging.warning("Camera not available. Using mock detection.")
@@ -941,6 +954,21 @@ def draw_centered_text(image, text, font, fill=0):
         # Fail silently to avoid crashing the display loop
         pass
 
+
+def draw_centered_text_at_y(image, text, font, y, fill=0):
+    """
+    Draw horizontal text centered at a specific vertical position (y).
+    Useful for multi-line layouts on the OLED.
+    """
+    try:
+        draw = ImageDraw.Draw(image)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        x = (image.width - text_width) // 2
+        draw.text((x, y), text, font=font, fill=fill)
+    except Exception:
+        pass
+
 def main():
     disp = None
     detector = None
@@ -983,17 +1011,24 @@ def main():
             font_large = ImageFont.truetype(font_path, 20)
             font_medium = ImageFont.truetype(font_path, 16)
         
+        # Read OLED display settings from config (for orientation)
+        oled_config = detector.config.get("oled_display", {})
+        oled_rotation = int(oled_config.get("rotation", 180))  # degrees: 0, 90, 180, 270
+
         # Main display loop - optimized for Pi Zero W
         # Reuse image buffer to reduce memory allocation
-        image = Image.new('1', (64, 128), 255)
+        # Use display dimensions when available, otherwise default to 128x64
+        oled_width = getattr(disp, "width", 128) if disp else 128
+        oled_height = getattr(disp, "height", 64) if disp else 64
+        image = Image.new('1', (oled_width, oled_height), 255)
         last_displayed_food = None
         last_displayed_calories = 0
 
         # Initial splash screen: show "V.A.R.G" centered on the OLED
         if disp:
-            image.paste(255, (0, 0, 64, 128))  # Clear to white
+            image.paste(255, (0, 0, oled_width, oled_height))  # Clear to white
             draw_centered_text(image, "V.A.R.G", font_large, fill=0)
-            rotated_image = image.rotate(180)
+            rotated_image = image.rotate(oled_rotation)
             disp.ShowImage(disp.getbuffer(rotated_image))
         
         while True:
@@ -1016,29 +1051,35 @@ def main():
             
             if data_changed and disp:
                 # Clear image (reuse buffer)
-                image.paste(255, (0, 0, 64, 128))  # Fill with white
+                image.paste(255, (0, 0, oled_width, oled_height))  # Fill with white
                 
-                # Display calories vertically
+                # Display food name and calories in a clean horizontal layout
                 if current_food and current_calories > 0:
                     logging.info(f"Displaying: {current_food} - {current_calories} cal")
-                    # Food name (vertical, on left side)
-                    food_text = current_food.upper()[:8]  # Limit length
-                    draw_vertical_text(image, food_text, 5, 10, font_medium, fill=0)
-                    
-                    # Calories (vertical, on right side) - simplified for performance
-                    cal_text = str(current_calories)
-                    draw_vertical_text(image, cal_text, 40, 10, font_large, fill=0)
-                    draw_vertical_text(image, "CAL", 40, 40, font_medium, fill=0)
+                    # Food name: uppercase, truncated to fit
+                    food_text = current_food.upper()
+                    if len(food_text) > 12:
+                        food_text = food_text[:12]
+
+                    # Calories: integer + "CAL"
+                    cal_int = int(current_calories)
+                    cal_text = f"{cal_int} CAL"
+
+                    # Two-line centered layout
+                    top_y = max(0, oled_height // 6)
+                    bottom_y = max(0, oled_height // 2)
+                    draw_centered_text_at_y(image, food_text, font_medium, top_y, fill=0)
+                    draw_centered_text_at_y(image, cal_text, font_large, bottom_y, fill=0)
                     
                     last_displayed_food = current_food
                     last_displayed_calories = current_calories
                 else:
-                    # Waiting for detection
+                    # Waiting for detection: show a simple centered status message
                     status_text = "SCAN"
-                    draw_vertical_text(image, status_text, 20, 20, font_medium, fill=0)
+                    draw_centered_text(image, status_text, font_medium, fill=0)
                 
-                # Rotate image 180 degrees for proper orientation on OLED (as per original code)
-                rotated_image = image.rotate(180)
+                # Rotate image for proper orientation on OLED
+                rotated_image = image.rotate(oled_rotation)
                 
                 # Display on OLED
                 disp.ShowImage(disp.getbuffer(rotated_image))
