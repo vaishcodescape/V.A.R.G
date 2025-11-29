@@ -14,6 +14,72 @@ import subprocess
 import importlib.util
 from pathlib import Path
 
+# Reuse the same best-effort helper used by the main app to free camera users
+def try_kill_camera_users():
+    """
+    Best-effort attempt to identify (and, when possible, terminate) other
+    processes that are actively using the Pi camera (libcamera pipeline or
+    /dev/video* devices).
+
+    This is mainly to reduce 'camera is in use by another process' errors when
+    running validation or V.A.R.G repeatedly. It is intentionally conservative:
+    if we don't have permission to kill a process we will simply report it.
+    """
+    try:
+        import subprocess as _subprocess
+        import os as _os
+
+        ps = _subprocess.run(
+            ["ps", "aux"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        current_pid = _os.getpid()
+        suspected = []
+
+        for line in ps.stdout.splitlines():
+            if any(
+                name in line
+                for name in [
+                    "libcamera-hello",
+                    "libcamera-vid",
+                    "libcamera-still",
+                    "rpicam-apps",
+                    "v.a.r.g.py",
+                ]
+            ):
+                parts = line.split()
+                if len(parts) > 1:
+                    pid = parts[1]
+                    if pid == str(current_pid):
+                        continue
+                    suspected.append((pid, line.strip()))
+
+        if not suspected:
+            return
+
+        print("⚠️  Potential camera-using processes detected:")
+        for pid, desc in suspected:
+            print(f"   PID {pid}: {desc}")
+
+        # Best-effort kill (may require sudo/root; failures are ignored)
+        for pid, _ in suspected:
+            try:
+                _subprocess.run(
+                    ["kill", "-9", pid],
+                    check=False,
+                    stdout=_subprocess.DEVNULL,
+                    stderr=_subprocess.DEVNULL,
+                )
+            except Exception:
+                # Ignore any failure here; user can still stop processes manually
+                continue
+    except Exception:
+        # Never crash validation just because this helper failed
+        pass
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -180,28 +246,43 @@ class SystemValidator:
         if self.is_pi:
             try:
                 import picamera2
-                picam = picamera2.Picamera2()
-                
-                # Try to configure and start
-                config = picam.create_preview_configuration(main={"size": (320, 240)})
-                picam.configure(config)
-                picam.start()
-                
-                # Test capture
-                time.sleep(1)
-                array = picam.capture_array()
-                picam.stop()
-                picam.close()
-                
-                if array is not None and array.size > 0:
+
+                def _test_picamera2():
+                    cam = picamera2.Picamera2()
+                    cfg = cam.create_preview_configuration(main={"size": (320, 240)})
+                    cam.configure(cfg)
+                    cam.start()
+                    time.sleep(1)
+                    arr = cam.capture_array()
+                    cam.stop()
+                    cam.close()
+                    return arr
+
+                try:
+                    array = _test_picamera2()
+                except Exception as first_err:
+                    print(f"⚠️  Pi Camera initial start failed: {first_err}")
+                    print("   Trying to free other camera users and retry...")
+                    try_kill_camera_users()
+                    time.sleep(1.0)
+                    try:
+                        array = _test_picamera2()
+                    except Exception as second_err:
+                        print(f"❌ Pi Camera still not available after retry: {second_err}")
+                        print("   This usually means another process is using the camera.")
+                        print("   Please stop libcamera test apps or any running v.a.r.g service,")
+                        print("   then re-run this validation.")
+                        array = None
+
+                if array is not None and getattr(array, "size", 0) > 0:
                     camera_results['pi_camera'] = True
                     camera_results['test_capture'] = True
-                    print("✅ Pi Camera working")
-                else:
+                    print("✅ Pi Camera working via Picamera2")
+                elif not camera_results['test_capture']:
                     print("❌ Pi Camera capture failed")
-                
+
             except Exception as e:
-                print(f"⚠️  Pi Camera not available: {e}")
+                print(f"⚠️  Pi Camera not available (Picamera2 import/config error): {e}")
         
         # Test USB Camera (fallback)
         if not camera_results['pi_camera']:

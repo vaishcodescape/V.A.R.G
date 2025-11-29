@@ -1,7 +1,6 @@
 import sys
 import os
 import json
-from pathlib import Path
 import gc
 import threading
 import logging
@@ -71,57 +70,39 @@ def try_kill_camera_users():
     try:
         import subprocess
 
-        # Kill any processes using /dev/video0-3
-        for idx in range(4):
-            dev = f"/dev/video{idx}"
-            if not os.path.exists(dev):
-                continue
-            try:
-                # fuser -k sends SIGKILL to processes using the device
-                subprocess.run(
-                    ["fuser", "-k", dev],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                # Ignore if fuser is not available or we lack permissions
-                continue
-
-        # Also look for common libcamera helper binaries and kill them
-        try:
-            ps = subprocess.run(
-                ["ps", "aux"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            for line in ps.stdout.splitlines():
-                if any(
-                    name in line
-                    for name in [
-                        "libcamera-hello",
-                        "libcamera-vid",
-                        "libcamera-still",
-                    ]
-                ):
-                    parts = line.split()
-                    if len(parts) > 1:
-                        pid = parts[1]
-                        # Avoid killing our own process
-                        if pid != str(os.getpid()):
-                            try:
-                                subprocess.run(
-                                    ["kill", "-9", pid],
-                                    check=False,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                )
-                            except Exception:
-                                continue
-        except Exception:
-            pass
+        # Look for common libcamera helper binaries and other VARG instances and kill them
+        ps = subprocess.run(
+            ["ps", "aux"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        for line in ps.stdout.splitlines():
+            if any(
+                name in line
+                for name in [
+                    "libcamera-hello",
+                    "libcamera-vid",
+                    "libcamera-still",
+                    "v.a.r.g.py",
+                ]
+            ):
+                parts = line.split()
+                if len(parts) > 1:
+                    pid = parts[1]
+                    # Avoid killing our own process
+                    if pid != str(os.getpid()):
+                        try:
+                            subprocess.run(
+                                ["kill", "-9", pid],
+                                check=False,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                        except Exception:
+                            continue
     except Exception:
+        # If anything goes wrong, fail silently to avoid crashing the main app
         pass
 
 # Waveshare OLED import
@@ -151,10 +132,6 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 
-# TensorFlow Lite support has been removed in this build to simplify deployment
-TFLITE_AVAILABLE = False
-TFLITE_RUNTIME = False
-
 # Try to import camera library (Picamera2) for native Pi camera support
 CAMERA_AVAILABLE = False
 try:
@@ -165,6 +142,16 @@ except ImportError:
     Picamera2 = None
     CAMERA_AVAILABLE = False
     logging.warning("Picamera2 not available. Camera will be disabled and mock detection used.")
+
+# Optional OpenCV fallback (for boards where Pi camera is exposed as /dev/video0)
+OPENCV_AVAILABLE = False
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+    logging.warning("OpenCV detected. Will use it as a fallback camera backend if Picamera2 fails.")
+except ImportError:
+    cv2 = None
+    OPENCV_AVAILABLE = False
 
 # Reduce logging for performance on Pi Zero W
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
@@ -182,6 +169,7 @@ class FoodDetector:
     def __init__(self, config_path='config.json'):
         self.config = self.load_config(config_path)
         self.camera = None
+        self.camera_backend = None  # "picamera2", "opencv", or None
         self.detected_food = None
         self.calories = 0
         self.detection_active = True
@@ -396,66 +384,132 @@ class FoodDetector:
             return None, None
     
     def init_camera(self):
-        """Initialize camera with Picamera2 for Pi Zero W."""
-        if not CAMERA_AVAILABLE or Picamera2 is None:
-            return False
-        
+        """
+        Initialize camera.
+
+        Preference order:
+        1) Picamera2 (native Pi camera pipeline)
+        2) OpenCV VideoCapture (e.g. /dev/video0) as a fallback
+        """
         # Use smaller resolution for Pi Zero W
         cam_width = int(self.config.get('camera_width', 224))
         cam_height = int(self.config.get('camera_height', 224))
 
-        try:
-            self.camera = Picamera2()
-            config = self.camera.create_preview_configuration(
-                main={"size": (cam_width, cam_height)},
-                buffer_count=1,  # Reduce buffer for memory
-            )
-            self.camera.configure(config)
-            self.camera.start()
-            logging.warning("Camera initialized (Picamera2 backend) on Pi Zero W")
-            return True
-        except Exception as e:
-            # First failure: try to free camera users and retry once
-            msg = str(e)
-            logging.error(
-                "Picamera2 failed to start (error: %s). Attempting to free camera users and retry...",
-                msg,
-            )
-            self.camera = None
-            try_kill_camera_users()
-            time.sleep(1.0)
+        # --- Try Picamera2 first (preferred Pi camera backend) ---
+        if CAMERA_AVAILABLE and Picamera2 is not None:
             try:
                 self.camera = Picamera2()
                 config = self.camera.create_preview_configuration(
                     main={"size": (cam_width, cam_height)},
-                    buffer_count=1,
+                    buffer_count=1,  # Reduce buffer for memory
                 )
                 self.camera.configure(config)
                 self.camera.start()
-                logging.warning("Camera initialized on retry after freeing camera users.")
+                self.camera_backend = "picamera2"
+                logging.warning("Camera initialized (Picamera2 backend) on Pi Zero W")
                 return True
-            except Exception as e2:
+            except Exception as e:
+                # First failure: try to free camera users and retry once
+                msg = str(e)
                 logging.error(
-                    "Picamera2 failed to start after retry (error: %s). "
-                    "This usually means the camera pipeline is still in use by another "
-                    "process (another v.a.r.g.py, libcamera-hello, a desktop camera app, etc.).",
-                    e2,
+                    "Picamera2 failed to start (error: %s). Attempting to free camera users and retry...",
+                    msg,
                 )
                 self.camera = None
+                self.camera_backend = None
+                try_kill_camera_users()
+                time.sleep(1.0)
+                try:
+                    self.camera = Picamera2()
+                    config = self.camera.create_preview_configuration(
+                        main={"size": (cam_width, cam_height)},
+                        buffer_count=1,
+                    )
+                    self.camera.configure(config)
+                    self.camera.start()
+                    self.camera_backend = "picamera2"
+                    logging.warning("Camera initialized on retry after freeing camera users.")
+                    return True
+                except Exception as e2:
+                    logging.error(
+                        "Picamera2 failed to start after retry (error: %s). "
+                        "This usually means the camera pipeline is still in use by another "
+                        "process (another v.a.r.g.py, libcamera-hello, a desktop camera app, etc.).",
+                        e2,
+                    )
+                    self.camera = None
+                    self.camera_backend = None
+                    # Fall through to OpenCV fallback if available
+
+        # --- OpenCV fallback (e.g. if Picamera2 is not available or still failing) ---
+        if OPENCV_AVAILABLE and cv2 is not None:
+            try:
+                cam_index = int(self.config.get('camera_index', 0))
+                cap = cv2.VideoCapture(cam_index)
+
+                if not cap.isOpened():
+                    logging.error(
+                        "OpenCV VideoCapture(%d) failed to open. No camera available on this index.",
+                        cam_index,
+                    )
+                    cap.release()
+                    return False
+
+                # Try to set resolution (some drivers ignore this, that's fine)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_height)
+
+                # Test grab one frame to validate it really works
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    logging.error(
+                        "OpenCV VideoCapture(%d) opened but failed to capture a frame.",
+                        cam_index,
+                    )
+                    cap.release()
+                    return False
+
+                self.camera = cap
+                self.camera_backend = "opencv"
+                logging.warning("Camera initialized using OpenCV VideoCapture fallback backend.")
+                return True
+            except Exception as e:
+                logging.error(f"OpenCV VideoCapture fallback failed: {e}")
+                if 'cap' in locals():
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                self.camera = None
+                self.camera_backend = None
                 return False
+
+        # No working backend
+        logging.error(
+            "No usable camera backend available. Picamera2 available: %s, OpenCV available: %s",
+            CAMERA_AVAILABLE,
+            OPENCV_AVAILABLE,
+        )
+        return False
     
     def capture_frame(self):
         """Capture a frame from camera"""
-        if not self.camera:
+        if not self.camera or not self.camera_backend:
             return None
-            
+
         try:
-            if hasattr(self.camera, "capture_array"):
+            if self.camera_backend == "picamera2" and hasattr(self.camera, "capture_array"):
                 # Picamera2
                 frame = self.camera.capture_array()
                 return frame
+            elif self.camera_backend == "opencv":
+                # OpenCV VideoCapture
+                ret, frame = self.camera.read()
+                if not ret or frame is None:
+                    return None
+                return frame
         except Exception as e:
-            logging.error(f"Error capturing frame: {e}")
+            logging.error(f"Error capturing frame using backend '{self.camera_backend}': {e}")
         return None
     
     def frame_hash(self, frame):
@@ -596,10 +650,9 @@ class FoodDetector:
         # and heuristic calorie estimation instead.
         
         if not self.init_camera():
-            logging.warning("Camera not available. Using mock detection.")
-            # Mock mode for testing
-            self.detected_food = "apple"
-            self.calories = 95
+            logging.error("Camera not available. Detection loop will not run.")
+            # Do not set any mock detection results; leave values unset so the UI
+            # can continue to show a neutral 'SCAN' / waiting state.
             return
         
         detection_interval = self.config.get('detection_interval', 5.0)
@@ -623,7 +676,7 @@ class FoodDetector:
                     continue
                 
                 if frame is not None:
-                    # Detect food using optimized pipeline (TFLite first, Groq when needed)
+                    # Detect food using Groq-based pipeline with caching
                     food, calories = self.detect_food(frame)
                     if food and calories > 0:
                         # Thread-safe update
@@ -639,12 +692,10 @@ class FoodDetector:
                     # Force garbage collection more aggressively on Pi Zero W
                     if self.frame_count % 10 == 0:
                         gc.collect()
-                else:
-                    # Mock detection if camera fails
-                    with self.lock:
-                        self.detected_food = "apple"
-                        self.calories = 95
-                    self.new_data_event.set()
+                # If frame is None, we simply skip this iteration without
+                # injecting any mock data. The display will remain in its
+                # existing state (typically 'SCAN') until a real detection
+                # succeeds.
                 
                 # Periodic memory cleanup for Pi Zero W
                 current_time = time.time()
@@ -663,14 +714,21 @@ class FoodDetector:
         if self.executor:
             self.executor.shutdown(wait=False)
         if self.camera:
-            # Picamera2 cleanup
             try:
-                if hasattr(self.camera, "stop"):
-                    self.camera.stop()
-                if hasattr(self.camera, "close"):
-                    self.camera.close()
+                if self.camera_backend == "picamera2":
+                    # Picamera2 cleanup
+                    if hasattr(self.camera, "stop"):
+                        self.camera.stop()
+                    if hasattr(self.camera, "close"):
+                        self.camera.close()
+                elif self.camera_backend == "opencv":
+                    # OpenCV VideoCapture cleanup
+                    if hasattr(self.camera, "release"):
+                        self.camera.release()
             except Exception:
                 pass
+        self.camera = None
+        self.camera_backend = None
 
 def draw_vertical_text(image, text, x, y, font, fill=0):
     """Draw text vertically (rotated 90 degrees) - optimized for Pi Zero W"""
