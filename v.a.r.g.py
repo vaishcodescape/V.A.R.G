@@ -112,13 +112,14 @@ except ImportError:
     logging.warning("waveshare_OLED library not found. Display will not work.")
     OLED_1in51 = None
 
-# Try to import requests for Groq API
+# Try to import Groq Python client for Groq API
 try:
-    import requests
-    REQUESTS_AVAILABLE = True
+    from groq import Groq
+    GROQ_CLIENT_AVAILABLE = True
 except ImportError:
-    REQUESTS_AVAILABLE = False
-    logging.warning("Requests library not available. Groq API will not work.")
+    GROQ_CLIENT_AVAILABLE = False
+    Groq = None
+    logging.warning("Groq Python client not available. Groq API will not work.")
 
 # Try to load environment variables
 try:
@@ -222,6 +223,7 @@ class FoodDetector:
         
         # Thread pool for async Groq calls
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.groq_client = None
         
     def load_config(self, config_path):
         """Load configuration from JSON file"""
@@ -253,8 +255,8 @@ class FoodDetector:
     
     def init_groq(self):
         """Initialize Groq API client"""
-        if not REQUESTS_AVAILABLE:
-            logging.warning("Requests library not available. Groq API disabled.")
+        if not GROQ_CLIENT_AVAILABLE:
+            logging.warning("Groq Python client not available. Groq API disabled.")
             return
         
         # Try to get API key from config or environment
@@ -262,11 +264,19 @@ class FoodDetector:
         if not self.groq_api_key:
             self.groq_api_key = os.getenv('GROQ_API_KEY', '')
         
-        if self.groq_api_key:
-            self.groq_enabled = True
-            logging.warning("Groq API initialized")
-        else:
+        if not self.groq_api_key:
             logging.warning("Groq API key not found. Groq features disabled.")
+            return
+
+        try:
+            # Initialize Groq client; it will also read GROQ_API_KEY from env if not passed
+            self.groq_client = Groq(api_key=self.groq_api_key)
+            self.groq_enabled = True
+            logging.warning("Groq API initialized using Groq Python client")
+        except Exception as e:
+            logging.error(f"Failed to initialize Groq client: {e}")
+            self.groq_client = None
+            self.groq_enabled = False
     
     def image_to_base64(self, image):
         """Convert PIL Image to base64 string for API - optimized for Pi Zero W"""
@@ -294,8 +304,8 @@ class FoodDetector:
             return None
     
     def query_groq_llm(self, image):
-        """Query Groq LLM with image for food detection and calorie estimation"""
-        if not self.groq_enabled or not REQUESTS_AVAILABLE:
+        """Query Groq LLM with image for food detection and calorie estimation (using Groq client)"""
+        if not self.groq_enabled or not GROQ_CLIENT_AVAILABLE or self.groq_client is None:
             return None, None
         
         try:
@@ -304,13 +314,6 @@ class FoodDetector:
             if not img_base64:
                 return None, None
             
-            # Prepare API request
-            url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {self.groq_api_key}",
-                "Content-Type": "application/json",
-            }
-
             # Build prompt text separately to avoid complex escaping
             prompt_text = (
                 "Analyze this food image. Identify the food item(s) and estimate the total calories. "
@@ -319,10 +322,10 @@ class FoodDetector:
                 "Be specific about the food item and provide an accurate calorie estimate based on typical serving size."
             )
 
-            # Use vision model for image analysis
-            payload = {
-                "model": self.groq_model,
-                "messages": [
+            # Use Groq Python client for vision model image analysis
+            completion = self.groq_client.chat.completions.create(
+                model=self.groq_model,
+                messages=[
                     {
                         "role": "user",
                         "content": [
@@ -339,18 +342,13 @@ class FoodDetector:
                         ],
                     }
                 ],
-                "max_tokens": 150,
-                "temperature": 0.3,
-            }
-            
-            # Make API request with shorter timeout for Pi Zero W (faster failure)
-            response = requests.post(url, json=payload, headers=headers, timeout=8)
-            response.raise_for_status()
+                max_tokens=150,
+                temperature=0.3,
+            )
             
             # Parse response
-            result = response.json()
-            if 'choices' in result and len(result['choices']) > 0:
-                content = result['choices'][0]['message']['content']
+            if completion and completion.choices:
+                content = completion.choices[0].message.content
                 
                 # Try to extract JSON from response
                 try:
@@ -377,14 +375,8 @@ class FoodDetector:
             
             return None, None
             
-        except requests.exceptions.Timeout:
-            logging.error("Groq API request timed out")
-            return None, None
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Groq API request failed: {e}")
-            return None, None
         except Exception as e:
-            logging.error(f"Error querying Groq LLM: {e}")
+            logging.error(f"Error querying Groq LLM via Groq client: {e}")
             return None, None
     
     def init_camera(self):
