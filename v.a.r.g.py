@@ -880,7 +880,7 @@ def main():
                 image.paste(255, (0, 0, oled_width, oled_height))  # Fill with white
                 
                 # Display food name and calories in a clean horizontal layout
-                if current_food and current_calories > 0:
+                if current_food and current_calories is not None and current_calories > 0:
                     logging.info(f"Displaying: {current_food} - {current_calories} cal")
                     # Food name: uppercase, truncated to fit
                     food_text = current_food.upper()
