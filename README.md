@@ -102,7 +102,7 @@ GROQ_API_KEY=your_groq_api_key_here
   "camera_width": 320,
   "camera_height": 240,
   "detection_confidence": 0.5,
-  "calorie_estimation_model": "llama-3.2-11b-vision-preview",
+  "calorie_estimation_model": "meta-llama/llama-4-maverick-17b-128e-instruct",
   "detection_interval": 3.0,
   "save_images": false,
   "output_dir": "detections",
