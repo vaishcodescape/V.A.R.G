@@ -189,16 +189,17 @@ class FoodDetector:
         
         # Groq API configuration
         self.groq_api_key = None
-        self.groq_model = self.config.get('calorie_estimation_model', 'llama-3.2-11b-vision-preview')
-        # Validate model is a vision-capable Groq model; fall back if misconfigured
+        # Default model is just a placeholder; real value should come from config.json
+        self.groq_model = self.config.get('calorie_estimation_model', 'llama-4-maverick-17b-128e-instruct')
+        # Warn (but do NOT override) if model name does not look like a vision-capable model
         model_lower = self.groq_model.lower()
         if 'vision' not in model_lower:
             logging.warning(
-                "Model '%s' does not appear to be a Groq vision model. "
-                "Falling back to 'llama-3.2-11b-vision-preview' for image analysis.",
+                "Groq model '%s' may not be a vision-capable model. "
+                "If you encounter errors, set 'calorie_estimation_model' in config.json "
+                "to a current Groq vision model from your Groq console.",
                 self.groq_model,
             )
-            self.groq_model = 'llama-3.2-11b-vision-preview'
         self.groq_enabled = False
         self.init_groq()
         
@@ -230,7 +231,8 @@ class FoodDetector:
                 'camera_height': 224,
                 'detection_interval': 5.0,  # Longer interval for Pi Zero W
                 'groq_api_key': '',
-                'calorie_estimation_model': 'llama-3.2-11b-vision-preview',
+                # NOTE: You should override this in config.json with a current Groq vision model.
+                'calorie_estimation_model': 'llama-4-maverick-17b-128e-instruct',
                 'tflite': {
                     'enabled': True,
                     'confidence_threshold': 0.35,

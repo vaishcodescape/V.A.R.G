@@ -4,7 +4,7 @@
   "camera_width": 320,
   "camera_height": 240,
   "detection_confidence": 0.5,
-  "calorie_estimation_model": "llama-3.2-11b-vision-preview",
+  "calorie_estimation_model": "llama-3.3-70b-versatile",
   "detection_interval": 3.0,
   "save_images": false,
   "output_dir": "detections",
@@ -38,14 +38,5 @@
     },
     "rotate": 0,
     "invert": false
-  },
-  "tflite": {
-    "enabled": true,
-    "model_path": "kagglehub:google/aiy/tfLite/vision-classifier-food-v1",
-    "confidence_threshold": 0.35,
-    "max_detections": 3,
-    "use_fallback_cv": true,
-    "model_priority": ["efficientnet_food", "mobilenet_food_v2", "food101_mobilenet"],
-    "smoothing": { "enabled": true, "window": 3 }
   }
 }
