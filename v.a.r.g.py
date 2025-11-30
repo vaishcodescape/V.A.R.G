@@ -340,7 +340,16 @@ class FoodDetector:
             }
 
             response = requests.post(url, headers=headers, json=payload, timeout=20)
-            response.raise_for_status()
+
+            if response.status_code != 200:
+                # Log full response body to help debug issues like 400 Bad Request
+                logging.error(
+                    "Groq API HTTP error %s: %s",
+                    response.status_code,
+                    response.text,
+                )
+                return None, None
+
             data = response.json()
 
             # Parse response
@@ -374,7 +383,7 @@ class FoodDetector:
             return None, None
             
         except Exception as e:
-            logging.error(f"Error querying Groq LLM via Groq client: {e}")
+            logging.error(f"Error querying Groq LLM via HTTP client: {e}")
             return None, None
     
     def init_camera(self):
