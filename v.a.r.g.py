@@ -12,6 +12,7 @@ import re
 import concurrent.futures
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+import requests
 
 # Configure GPIOZero to use RPi.GPIO backend by default (avoids some lgpio 'GPIO busy' issues)
 os.environ.setdefault("GPIOZERO_PIN_FACTORY", "rpigpio")
@@ -111,15 +112,6 @@ try:
 except ImportError:
     logging.warning("waveshare_OLED library not found. Display will not work.")
     OLED_1in51 = None
-
-# Try to import Groq Python client for Groq API
-try:
-    from groq import Groq
-    GROQ_CLIENT_AVAILABLE = True
-except ImportError:
-    GROQ_CLIENT_AVAILABLE = False
-    Groq = None
-    logging.warning("Groq Python client not available. Groq API will not work.")
 
 # Try to load environment variables
 try:
@@ -254,11 +246,7 @@ class FoodDetector:
             }
     
     def init_groq(self):
-        """Initialize Groq API client"""
-        if not GROQ_CLIENT_AVAILABLE:
-            logging.warning("Groq Python client not available. Groq API disabled.")
-            return
-        
+        """Initialize Groq API configuration (HTTP via requests)"""
         # Try to get API key from config or environment
         self.groq_api_key = self.config.get('groq_api_key', '')
         if not self.groq_api_key:
@@ -269,13 +257,13 @@ class FoodDetector:
             return
 
         try:
-            # Initialize Groq client; it will also read GROQ_API_KEY from env if not passed
-            self.groq_client = Groq(api_key=self.groq_api_key)
+            # We don't need a persistent client when using requests; just validate format a bit
+            if not isinstance(self.groq_api_key, str) or not self.groq_api_key.strip():
+                raise ValueError("Invalid Groq API key")
             self.groq_enabled = True
-            logging.warning("Groq API initialized using Groq Python client")
+            logging.warning("Groq API initialized using HTTP (requests) client")
         except Exception as e:
-            logging.error(f"Failed to initialize Groq client: {e}")
-            self.groq_client = None
+            logging.error(f"Failed to initialize Groq configuration: {e}")
             self.groq_enabled = False
     
     def image_to_base64(self, image):
@@ -304,8 +292,8 @@ class FoodDetector:
             return None
     
     def query_groq_llm(self, image):
-        """Query Groq LLM with image for food detection and calorie estimation (using Groq client)"""
-        if not self.groq_enabled or not GROQ_CLIENT_AVAILABLE or self.groq_client is None:
+        """Query Groq LLM with image for food detection and calorie estimation (HTTP via requests)"""
+        if not self.groq_enabled or not self.groq_api_key:
             return None, None
         
         try:
@@ -322,10 +310,15 @@ class FoodDetector:
                 "Be specific about the food item and provide an accurate calorie estimate based on typical serving size."
             )
 
-            # Use Groq Python client for vision model image analysis
-            completion = self.groq_client.chat.completions.create(
-                model=self.groq_model,
-                messages=[
+            # Prepare Groq HTTP request (OpenAI-compatible chat completions API)
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.groq_api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self.groq_model,
+                "messages": [
                     {
                         "role": "user",
                         "content": [
@@ -342,13 +335,18 @@ class FoodDetector:
                         ],
                     }
                 ],
-                max_tokens=150,
-                temperature=0.3,
-            )
-            
+                "max_tokens": 150,
+                "temperature": 0.3,
+            }
+
+            response = requests.post(url, headers=headers, json=payload, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+
             # Parse response
-            if completion and completion.choices:
-                content = completion.choices[0].message.content
+            choices = data.get("choices") or []
+            if choices:
+                content = choices[0].get("message", {}).get("content", "")
                 
                 # Try to extract JSON from response
                 try:
