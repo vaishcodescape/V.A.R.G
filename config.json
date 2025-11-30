@@ -4,7 +4,7 @@
   "camera_width": 320,
   "camera_height": 240,
   "detection_confidence": 0.5,
-  "calorie_estimation_model": "llama-3.3-70b-versatile",
+  "calorie_estimation_model": "llama-3.2-90b-vision-preview",
   "detection_interval": 3.0,
   "save_images": false,
   "output_dir": "detections",

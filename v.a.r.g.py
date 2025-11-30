@@ -189,15 +189,15 @@ class FoodDetector:
         
         # Groq API configuration
         self.groq_api_key = None
-        # Default model is just a placeholder; real value should come from config.json
-        self.groq_model = self.config.get('calorie_estimation_model', 'llama-4-maverick-17b-128e-instruct')
-        # Warn (but do NOT override) if model name does not look like a vision-capable model
+        # Default to a Groq vision-capable model; can be overridden in config.json
+        self.groq_model = self.config.get('calorie_estimation_model', 'llama-3.2-90b-vision-preview')
+        # Basic sanity check to nudge user if they pick a non-vision model
         model_lower = self.groq_model.lower()
         if 'vision' not in model_lower:
             logging.warning(
                 "Groq model '%s' may not be a vision-capable model. "
-                "If you encounter errors, set 'calorie_estimation_model' in config.json "
-                "to a current Groq vision model from your Groq console.",
+                "For image analysis, use a Groq vision model such as 'llama-3.2-90b-vision-preview' "
+                "or another current vision model from your Groq console.",
                 self.groq_model,
             )
         self.groq_enabled = False
