@@ -197,11 +197,15 @@ class FoodDetector:
         # Groq API configuration
         self.groq_api_key = None
         self.groq_model = self.config.get('calorie_estimation_model', 'llama-3.2-11b-vision-preview')
-        # Validate model is a vision model
-        if 'vision' not in self.groq_model.lower() and 'llama3-70b' not in self.groq_model.lower():
-            # Check if it's a known non-vision model
-            if 'llama3-70b-8192' in self.groq_model.lower():
-                logging.warning(f"Model '{self.groq_model}' may not support vision. Consider using 'llama-3.2-11b-vision-preview' for image analysis.")
+        # Validate model is a vision-capable Groq model; fall back if misconfigured
+        model_lower = self.groq_model.lower()
+        if 'vision' not in model_lower:
+            logging.warning(
+                "Model '%s' does not appear to be a Groq vision model. "
+                "Falling back to 'llama-3.2-11b-vision-preview' for image analysis.",
+                self.groq_model,
+            )
+            self.groq_model = 'llama-3.2-11b-vision-preview'
         self.groq_enabled = False
         self.init_groq()
         
@@ -646,8 +650,7 @@ class FoodDetector:
     
     def run_detection_loop(self):
         """Main detection loop - optimized for Pi Zero W"""
-        # TensorFlow Lite support has been removed; we rely on Groq LLM (when enabled)
-        # and heuristic calorie estimation instead.
+         # and heuristic calorie estimation instead.
         
         if not self.init_camera():
             logging.error("Camera not available. Detection loop will not run.")
