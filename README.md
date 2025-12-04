@@ -15,8 +15,7 @@ A food detection and calorie estimation system designed for Raspberry Pi Zero W,
 
 **Real-time food detection and calorie estimation powered by Raspberry Pi Zero W**
 
-> 📝 **Want to add more images?** See the [Images Guide](docs/images/README.md) for instructions on adding hardware photos, OLED displays, and detection examples.
-
+>  
 </div>
 
 ---
