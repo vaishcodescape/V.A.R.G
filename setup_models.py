@@ -213,6 +213,8 @@ class ModelSetup:
 
 def main():
     """Main setup function"""
+    import sys
+    
     print("🤖 V.A.R.G TensorFlow Lite Model Setup")
     print("=" * 50)
     
@@ -221,12 +223,26 @@ def main():
     # Create model info file
     setup.create_model_info_file()
     
+    # Check for command line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--all":
+            logger.info("Setting up all models...")
+            setup.setup_all_models()
+            return
+        elif sys.argv[1] == "--recommended":
+            logger.info("Setting up recommended model...")
+            setup.setup_recommended_model()
+            return
+        elif sys.argv[1] == "--non-interactive":
+            logger.info("Non-interactive mode: setting up recommended model...")
+            setup.setup_recommended_model()
+            return
+    
     # List available models
     setup.list_models()
     
-    # Automatically select recommended model in non-interactive environments
-    import sys
-    if not sys.stdout.isatty():
+    # Check if we're in a non-interactive environment (pipe, script, etc.)
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
         logger.info("Non-interactive environment detected, setting up recommended model...")
         setup.setup_recommended_model()
         logger.info("\n✅ Model setup complete!")
@@ -238,9 +254,14 @@ def main():
     print("2. Setup all models (requires more storage)")
     print("3. Setup specific model")
     print("4. List models only")
+    print("5. Skip model setup")
     
     try:
-        choice = input("\nEnter your choice (1-4): ").strip()
+        choice = input("\nEnter your choice (1-5) [default: 1]: ").strip()
+        
+        # Default to recommended if empty
+        if not choice:
+            choice = "1"
         
         if choice == "1":
             setup.setup_recommended_model()
@@ -260,11 +281,19 @@ def main():
                 print("Invalid model choice")
         elif choice == "4":
             print("Models listed above.")
+        elif choice == "5":
+            print("Skipping model setup.")
+            return
         else:
-            print("Invalid choice")
+            print("Invalid choice, setting up recommended model...")
+            setup.setup_recommended_model()
     
     except KeyboardInterrupt:
         print("\n\nSetup cancelled by user")
+    except EOFError:
+        # Handle EOF in non-interactive contexts
+        logger.info("EOF detected, setting up recommended model...")
+        setup.setup_recommended_model()
     except Exception as e:
         logger.error(f"Setup failed: {e}")
     

@@ -229,22 +229,29 @@ class DependencyManager:
         # In non-interactive contexts (e.g., scripts), skip prompts and continue
         try:
             import sys as _sys
-            if not _sys.stdin.isatty():
+            if not _sys.stdin.isatty() or not _sys.stdout.isatty():
                 logger.info("Non-interactive mode detected; skipping optional dependencies")
                 return True
         except Exception:
             pass
 
         try:
-            choice = input("\nInstall optional dependencies? (y/n/selective): ").lower().strip()
+            choice = input("\nInstall optional dependencies? (y/n/selective) [default: n]: ").lower().strip()
+            
+            # Default to skip if empty
+            if not choice:
+                choice = 'n'
             
             if choice == 'y':
                 # Install all
                 for module, package in self.optional_packages:
-                    self.install_package(package)
+                    if package:  # Only if package spec exists
+                        self.install_package(package)
             elif choice == 'selective':
                 # Let user choose
                 for module, package in self.optional_packages:
+                    if not package:  # Skip if no package spec
+                        continue
                     description = self.get_package_description(module)
                     install = input(f"Install {module} ({description})? (y/n): ").lower().strip()
                     if install == 'y':
@@ -253,7 +260,9 @@ class DependencyManager:
                 logger.info("Skipping optional dependencies")
         
         except KeyboardInterrupt:
-            logger.info("Installation cancelled by user")
+            logger.info("\nInstallation cancelled by user")
+        except EOFError:
+            logger.info("EOF detected; skipping optional dependencies")
         
         return True
     

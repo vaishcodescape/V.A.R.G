@@ -2,6 +2,19 @@
 
 A food detection and calorie estimation system designed for Raspberry Pi Zero W, using lightweight computer vision (PIL/scikit-image), TensorFlow Lite, and Groq LLM integration.
 
+## 🚀 Quick Install
+
+```bash
+git clone <YOUR_REPO_URL> V.A.R.G
+cd V.A.R.G
+./install.sh
+
+# Verify everything is set up correctly
+./verify_installation.sh
+```
+
+**That's it!** The installer automatically handles all dependencies, models, and configuration. See [QUICKSTART.md](QUICKSTART.md) for details.
+
 ## 🎯 Features
 
 - **TensorFlow Lite Food Detection**: Uses pre-trained TFLite models for accurate food classification
@@ -20,45 +33,126 @@ A food detection and calorie estimation system designed for Raspberry Pi Zero W,
 - MicroSD card (16GB+ recommended)
 - Power supply (5V, 2A recommended)
 
-## 📦 Setup & Execution
+## 📦 Installation
 
-### Quick Start — Clone and Auto-Start on Raspberry Pi
+### 🚀 One-Command Installation (Recommended)
 
+**For Raspberry Pi Zero W:**
 ```bash
-# On your Raspberry Pi (Zero W or newer)
-sudo apt update && sudo apt install -y git
-
-# Clone the repo (replace <YOUR_REPO_URL> if needed)
-cd /home/pi
+# Clone the repository
 git clone <YOUR_REPO_URL> V.A.R.G
 cd V.A.R.G
 
-# Deploy (creates venv, installs deps, sets up models/service, enables auto-start)
-chmod +x deploy_pi.sh
-./deploy_pi.sh
+# Run the automated installer - it handles everything!
+chmod +x install.sh
+./install.sh
 
-# Add your Groq API key (optional; LLM features disabled if omitted)
-echo "GROQ_API_KEY=your_actual_groq_api_key_here" > .env
+# Optional: Add your Groq API key for LLM features
+nano .env
+# Set: GROQ_API_KEY=your_key_here
 
-# Reboot to apply firmware config and start the service
+# Reboot to apply all hardware changes
 sudo reboot
 ```
 
-Run the system:
+**For Development/Testing (Mac/Linux):**
 ```bash
-# Start immediately (manual run)
+# Clone the repository
+git clone <YOUR_REPO_URL> V.A.R.G
+cd V.A.R.G
+
+# Run the automated installer
+chmod +x install.sh
+./install.sh
+
+# Start V.A.R.G
 source varg_env/bin/activate
 python3 v.a.r.g.py
-
-# Or use the service (auto-start already enabled by deploy_pi.sh)
-sudo systemctl status varg.service
-sudo journalctl -u varg.service -f
 ```
 
-Monitor:
+### ✨ What the Installer Does
+
+The `install.sh` script automatically:
+- ✅ Detects your platform (Raspberry Pi or development machine)
+- ✅ Installs all system dependencies
+- ✅ Enables hardware interfaces (camera, SPI, I2C)
+- ✅ Creates and configures Python virtual environment
+- ✅ Installs all Python packages
+- ✅ Sets up Waveshare OLED library
+- ✅ Downloads TensorFlow Lite models
+- ✅ Creates configuration files
+- ✅ Sets up systemd service (Raspberry Pi only)
+- ✅ Creates monitoring and startup scripts
+
+### 🎮 Running V.A.R.G
+
+**Manual Start:**
+```bash
+# Activate the virtual environment
+source varg_env/bin/activate
+
+# Run V.A.R.G
+python3 v.a.r.g.py
+```
+
+**As a Service (Raspberry Pi):**
+```bash
+# Start the service
+sudo systemctl start varg.service
+
+# Check status
+sudo systemctl status varg.service
+
+# View logs
+sudo journalctl -u varg.service -f
+
+# Enable auto-start on boot (already done by installer)
+sudo systemctl enable varg.service
+```
+
+**Quick Start Script:**
+```bash
+./start_varg.sh
+```
+
+**Monitor System:**
 ```bash
 ./monitor_varg.sh
-sudo journalctl -u varg.service -f
+```
+
+### 📋 Advanced Installation Options
+
+If you prefer manual control or need custom configuration, you can use:
+
+**Option 1: Deploy script (Raspberry Pi only)**
+```bash
+chmod +x deploy_pi.sh
+./deploy_pi.sh
+```
+
+**Option 2: Setup script (Raspberry Pi only)**
+```bash
+chmod +x setup_pi.sh
+./setup_pi.sh
+```
+
+**Option 3: Manual installation**
+```bash
+# Create virtual environment
+python3 -m venv --system-site-packages varg_env
+source varg_env/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Setup models
+python3 setup_models.py
+
+# Setup Waveshare OLED
+./setup_waveshare_oled.sh
+
+# Run
+python3 v.a.r.g.py
 ```
 
 ### Lightweight Detection Stack
