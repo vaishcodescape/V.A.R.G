@@ -29,7 +29,7 @@ cd V.A.R.G
 ## 🛠️ Hardware Requirements
 
 - Raspberry Pi Zero W
-- USB Camera or Raspberry Pi Camera Module
+- Raspberry Pi Camera Module
 - MicroSD card (16GB+ recommended)
 - Power supply (5V, 2A recommended)
 
