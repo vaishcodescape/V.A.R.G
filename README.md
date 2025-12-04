@@ -2,6 +2,25 @@
 
 A food detection and calorie estimation system designed for Raspberry Pi Zero W, using lightweight computer vision (PIL/scikit-image), TensorFlow Lite, and Groq LLM integration.
 
+## 📸 Project Gallery
+
+<div align="center">
+
+### V.A.R.G System
+
+<p float="left">
+  <img src="docs/images/system_complete.jpg" width="400" alt="Complete V.A.R.G System" />
+  <img src="docs/images/oled_display_1.jpg" width="400" alt="OLED Display in Action" />
+</p>
+
+**Real-time food detection and calorie estimation powered by Raspberry Pi Zero W**
+
+> 📝 **Want to add more images?** See the [Images Guide](docs/images/README.md) for instructions on adding hardware photos, OLED displays, and detection examples.
+
+</div>
+
+---
+
 ## 🚀 Quick Install
 
 ```bash
