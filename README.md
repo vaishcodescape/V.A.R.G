@@ -1,6 +1,6 @@
 # V.A.R.G -  Virtual Augmented Reality Glasses
 
-A food detection and calorie estimation system designed for Raspberry Pi Zero W, using lightweight computer vision (PIL/scikit-image), TensorFlow Lite, and Groq LLM integration.
+A food detection and calorie estimation system designed for Raspberry Pi Zero W, using lightweight computer vision (PIL/scikit-image) and Groq LLM integration.
 
 ## 📸 Project Gallery
 
